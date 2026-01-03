@@ -2,7 +2,7 @@
 // @name        Vercel 汉化 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 汉化 Vercel 界面 (支持 AI 自动翻译)
-// @version     0.4.0
+// @version     0.6.0
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*.vercel.app/*
@@ -13,10 +13,6 @@
 // @grant       GM_getValue
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
-// @connect     api-free.deepl.com
-// @connect     api.deepl.com
-// @connect     api.openai.com
-// @connect     api.anthropic.com
 // @connect     *
 // @run-at      document-end
 // ==/UserScript==
@@ -1052,16 +1048,60 @@
     const pendingTexts = new Set();
     const progressState = { total: 0, completed: 0 };
     let progressElement = null;
+    let visibilityObserver = null;
+    const pendingElements = new WeakMap(); // 存储待翻译的元素和回调
+
+    // ==================== 可见性检测 ====================
+    function initVisibilityObserver() {
+        if (visibilityObserver) return;
+
+        visibilityObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    // 元素进入可见区域，执行翻译
+                    const element = entry.target;
+                    const callback = pendingElements.get(element);
+
+                    if (callback) {
+                        callback();
+                        pendingElements.delete(element);
+                        visibilityObserver.unobserve(element);
+                    }
+                }
+            });
+        }, {
+            root: null,
+            rootMargin: '50px', // 提前50px开始加载
+            threshold: 0.01 // 至少1%可见
+        });
+
+        console.log('[Vercel汉化] IntersectionObserver 已初始化');
+    }
+
+    // 检查元素是否在可见区域
+    function isElementVisible(element) {
+        if (!element || !element.getBoundingClientRect) return false;
+
+        const rect = element.getBoundingClientRect();
+        const windowHeight = window.innerHeight || document.documentElement.clientHeight;
+        const windowWidth = window.innerWidth || document.documentElement.clientWidth;
+
+        return (
+            rect.bottom >= -50 &&
+            rect.top <= windowHeight + 50 &&
+            rect.right >= 0 &&
+            rect.left <= windowWidth
+        );
+    }
 
     // ==================== 翻译 API 集成 ====================
-    async function translateWithDeepL(texts, overrideConfig = {}) {
-        const apiKey = overrideConfig.apiKey ?? GM_getValue(CONFIG.API_KEY_KEY, '');
-        const endpoint = overrideConfig.endpoint ?? GM_getValue(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
-        const modelName = overrideConfig.modelName ?? GM_getValue(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+    // 工具函数：延迟等待
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
 
-        if (!apiKey) {
-            throw new Error('未配置 API 密钥');
-        }
+    // 核心翻译函数（单次请求）
+    async function translateRequest(texts, apiKey, endpoint, modelName) {
 
         // 根据模型类型构建请求
         if (modelName === 'deepl') {
@@ -1080,23 +1120,48 @@
                     data: data,
                     timeout: 10000,
                     onload: (response) => {
+                        console.log('[Vercel汉化] DeepL API 响应:', {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: response.responseHeaders,
+                            body: response.responseText
+                        });
+
                         if (response.status >= 200 && response.status < 300) {
                             try {
                                 const body = JSON.parse(response.responseText);
                                 resolve(body.translations.map(t => t.text));
                             } catch (e) {
+                                console.error('[Vercel汉化] 解析 DeepL 响应失败:', e, '原始响应:', response.responseText);
                                 reject(new Error('解析响应失败'));
                             }
                         } else if (response.status === 429) {
+                            console.error('[Vercel汉化] API 配额已用完，响应体:', response.responseText);
                             reject(new Error('API 配额已用完'));
                         } else if (response.status === 403) {
+                            console.error('[Vercel汉化] API 密钥无效，响应体:', response.responseText);
                             reject(new Error('API 密钥无效'));
                         } else {
+                            console.error(`[Vercel汉化] HTTP ${response.status} 错误，完整响应:`, {
+                                status: response.status,
+                                statusText: response.statusText,
+                                headers: response.responseHeaders,
+                                body: response.responseText
+                            });
                             reject(new Error(`HTTP ${response.status}`));
                         }
                     },
-                    onerror: () => reject(new Error('网络请求失败')),
-                    ontimeout: () => reject(new Error('请求超时'))
+                    onerror: (err) => {
+                        console.error('[Vercel汉化] DeepL 网络错误，完整信息:', {
+                            error: err,
+                            readyState: err.readyState,
+                            status: err.status,
+                            responseText: err.responseText,
+                            responseHeaders: err.responseHeaders
+                        });
+                        reject(new Error(`网络请求失败 - 请检查：\n1. API端点URL是否正确\n2. 网络连接是否正常\n3. 是否需要配置代理\n4. Tampermonkey是否允许跨域请求`));
+                    },
+                    ontimeout: () => reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'))
                 });
             });
         } else {
@@ -1123,6 +1188,13 @@
                     }),
                     timeout: 15000,
                     onload: (response) => {
+                        console.log('[Vercel汉化] OpenAI 兼容 API 响应:', {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: response.responseHeaders,
+                            body: response.responseText
+                        });
+
                         if (response.status >= 200 && response.status < 300) {
                             try {
                                 const body = JSON.parse(response.responseText);
@@ -1137,7 +1209,7 @@
 
                                 // 确保结果数量匹配
                                 if (results.length !== texts.length) {
-                                    console.warn('[Vercel汉化] 翻译结果数量不匹配');
+                                    console.warn('[Vercel汉化] 翻译结果数量不匹配，期望:', texts.length, '实际:', results.length);
                                     // 补齐缺失的翻译
                                     while (results.length < texts.length) {
                                         results.push(texts[results.length]);
@@ -1146,17 +1218,84 @@
 
                                 resolve(results);
                             } catch (e) {
+                                console.error('[Vercel汉化] 解析 OpenAI 响应失败:', e, '原始响应:', response.responseText);
                                 reject(new Error('解析响应失败'));
                             }
                         } else {
+                            console.error(`[Vercel汉化] HTTP ${response.status} 错误，完整响应:`, {
+                                status: response.status,
+                                statusText: response.statusText,
+                                headers: response.responseHeaders,
+                                body: response.responseText
+                            });
                             reject(new Error(`HTTP ${response.status}`));
                         }
                     },
-                    onerror: () => reject(new Error('网络请求失败')),
-                    ontimeout: () => reject(new Error('请求超时'))
+                    onerror: (err) => {
+                        console.error('[Vercel汉化] OpenAI 兼容 API 网络错误，完整信息:', {
+                            error: err,
+                            readyState: err.readyState,
+                            status: err.status,
+                            responseText: err.responseText,
+                            responseHeaders: err.responseHeaders
+                        });
+                        reject(new Error(`网络请求失败 - 请检查：\n1. API端点URL是否正确\n2. 网络连接是否正常\n3. 是否需要配置代理\n4. Tampermonkey是否允许跨域请求`));
+                    },
+                    ontimeout: () => reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'))
                 });
             });
         }
+    }
+
+    // 带重试的翻译函数（最多重试3次）
+    async function translateWithDeepL(texts, overrideConfig = {}) {
+        const apiKey = overrideConfig.apiKey ?? GM_getValue(CONFIG.API_KEY_KEY, '');
+        const endpoint = overrideConfig.endpoint ?? GM_getValue(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
+        const modelName = overrideConfig.modelName ?? GM_getValue(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+
+        if (!apiKey) {
+            throw new Error('未配置 API 密钥');
+        }
+
+        const maxRetries = 3;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`[Vercel汉化] 翻译尝试 ${attempt}/${maxRetries}`);
+                const result = await translateRequest(texts, apiKey, endpoint, modelName);
+
+                // 成功后，如果之前失败过，记录成功信息
+                if (attempt > 1) {
+                    console.log(`[Vercel汉化] 重试成功（第 ${attempt} 次尝试）`);
+                }
+
+                return result;
+            } catch (error) {
+                lastError = error;
+
+                // 不可重试的错误（配额用完、密钥无效等）
+                const nonRetryableErrors = ['API 配额已用完', 'API 密钥无效'];
+                if (nonRetryableErrors.some(msg => error.message.includes(msg))) {
+                    console.error(`[Vercel汉化] 不可重试的错误: ${error.message}`);
+                    throw error;
+                }
+
+                // 最后一次尝试失败
+                if (attempt === maxRetries) {
+                    console.error(`[Vercel汉化] 翻译失败，已重试 ${maxRetries} 次: ${error.message}`);
+                    break;
+                }
+
+                // 等待后重试（指数退避：1s, 2s, 4s）
+                const delay = Math.pow(2, attempt - 1) * 1000;
+                console.warn(`[Vercel汉化] 第 ${attempt} 次尝试失败: ${error.message}，${delay}ms 后重试...`);
+                await sleep(delay);
+            }
+        }
+
+        // 所有重试都失败后抛出最后的错误
+        throw lastError || new Error('翻译失败');
     }
 
     // ==================== 翻译记录与进度 ====================
@@ -1458,12 +1597,28 @@
         if (node.parentNode && shouldIgnoreNode(node.parentNode)) return;
 
         const originalText = node.nodeValue.trim();
+        const parentElement = node.parentNode;
 
-        translateText(originalText, { type: 'textNode' }, (translated) => {
-            if (translated && translated !== originalText) {
-                node.nodeValue = node.nodeValue.replace(originalText, translated);
+        // 定义翻译执行函数
+        const doTranslate = () => {
+            translateText(originalText, { type: 'textNode' }, (translated) => {
+                if (translated && translated !== originalText) {
+                    node.nodeValue = node.nodeValue.replace(originalText, translated);
+                }
+            });
+        };
+
+        // 检查父元素是否在可见区域
+        if (parentElement && isElementVisible(parentElement)) {
+            // 立即翻译
+            doTranslate();
+        } else if (parentElement) {
+            // 延迟翻译，等待进入可见区域
+            pendingElements.set(parentElement, doTranslate);
+            if (visibilityObserver) {
+                visibilityObserver.observe(parentElement);
             }
-        });
+        }
     }
 
     function translateAttribute(element, attrName) {
@@ -1472,11 +1627,26 @@
         const attrValue = element.getAttribute(attrName);
         if (!attrValue || !attrValue.trim()) return;
 
-        translateText(attrValue, { type: 'attribute', attr: attrName }, (translated) => {
-            if (translated && translated !== attrValue) {
-                element.setAttribute(attrName, translated);
+        // 定义翻译执行函数
+        const doTranslate = () => {
+            translateText(attrValue, { type: 'attribute', attr: attrName }, (translated) => {
+                if (translated && translated !== attrValue) {
+                    element.setAttribute(attrName, translated);
+                }
+            });
+        };
+
+        // 检查元素是否在可见区域
+        if (isElementVisible(element)) {
+            // 立即翻译
+            doTranslate();
+        } else {
+            // 延迟翻译，等待进入可见区域
+            pendingElements.set(element, doTranslate);
+            if (visibilityObserver) {
+                visibilityObserver.observe(element);
             }
-        });
+        }
     }
 
     // ==================== 用户配置界面 ====================
@@ -1583,15 +1753,46 @@
             { value: 'custom', text: '自定义模型' }
         ];
 
+        // 检查当前模型是否为预设模型
+        const isPresetModel = models.some(m => m.value === currentModel);
+        let actualCustomModel = currentModel;
+
         models.forEach(m => {
             const option = document.createElement('option');
             option.value = m.value;
             option.textContent = m.text;
-            if (m.value === currentModel) option.selected = true;
+            if (m.value === currentModel) {
+                option.selected = true;
+            } else if (m.value === 'custom' && !isPresetModel) {
+                option.selected = true;
+            }
             modelSelect.appendChild(option);
         });
 
         modelWrapper.appendChild(modelSelect);
+
+        // 自定义模型名称输入框
+        const customModelInput = document.createElement('input');
+        customModelInput.type = 'text';
+        customModelInput.id = 'vc-custom-model';
+        customModelInput.className = 'vc-input';
+        customModelInput.placeholder = '例如: gpt-4, claude-3-5-sonnet-20241022';
+        customModelInput.value = !isPresetModel ? currentModel : '';
+        customModelInput.style.marginTop = '8px';
+        customModelInput.style.display = (!isPresetModel || modelSelect.value === 'custom') ? 'block' : 'none';
+
+        modelWrapper.appendChild(customModelInput);
+
+        // 监听模型选择变化
+        modelSelect.addEventListener('change', () => {
+            if (modelSelect.value === 'custom') {
+                customModelInput.style.display = 'block';
+                customModelInput.focus();
+            } else {
+                customModelInput.style.display = 'none';
+            }
+        });
+
         modelGroup.appendChild(modelLabel);
         modelGroup.appendChild(modelWrapper);
 
@@ -1680,24 +1881,48 @@
         testBtn.onclick = async () => {
             const apiKey = keyInput.value.trim();
             const endpoint = endpointInput.value.trim();
-            const modelName = modelSelect.value;
+            let modelName = modelSelect.value;
+
+            // 如果选择了自定义模型，使用自定义输入框的值
+            if (modelName === 'custom') {
+                modelName = customModelInput.value.trim();
+            }
+
+            if (!apiKey) {
+                alert('⚠️ 请先输入 API 密钥');
+                keyInput.focus();
+                return;
+            }
+
+            if (!endpoint) {
+                alert('⚠️ 请先输入 API 接入点');
+                endpointInput.focus();
+                return;
+            }
 
             testResult.textContent = '测试中...';
             testResult.style.color = 'var(--vc-warning)';
             testBtn.disabled = true;
-            
+
             try {
-                await translateWithDeepL(['ping'], { apiKey, endpoint, modelName });
+                await translateWithDeepL(['Hello'], { apiKey, endpoint, modelName });
                 testResult.textContent = '✅ 连接成功';
                 testResult.style.color = 'var(--vc-success)';
             } catch (err) {
                 testResult.textContent = '❌ 连接失败';
-                testResult.title = err.message;
                 testResult.style.color = 'var(--vc-error)';
+
+                // 显示详细的错误诊断
+                showErrorDiagnosis(err, endpoint, modelName);
             } finally {
                 testBtn.disabled = false;
             }
         };
+
+        const troubleshootBtn = document.createElement('button');
+        troubleshootBtn.className = 'vc-btn vc-btn-secondary vc-btn-sm';
+        troubleshootBtn.textContent = '故障排查';
+        troubleshootBtn.onclick = () => showTroubleshootGuide();
 
         const historyBtn = document.createElement('button');
         historyBtn.className = 'vc-btn vc-btn-secondary vc-btn-sm';
@@ -1706,6 +1931,7 @@
         toolsGroup.appendChild(cacheStats);
         toolsGroup.appendChild(clearCacheBtn);
         toolsGroup.appendChild(testBtn);
+        toolsGroup.appendChild(troubleshootBtn);
         toolsGroup.appendChild(historyBtn);
         toolsGroup.appendChild(testResult);
 
@@ -1766,8 +1992,19 @@
         saveBtn.onclick = () => {
             const newKey = keyInput.value.trim();
             const newEndpoint = endpointInput.value.trim();
-            const newModel = modelSelect.value;
+            let newModel = modelSelect.value;
             const newEnabled = aiCheckbox.checked;
+
+            // 如果选择了自定义模型，使用自定义输入框的值
+            if (newModel === 'custom') {
+                const customModel = customModelInput.value.trim();
+                if (!customModel) {
+                    alert('⚠️ 请输入自定义模型名称');
+                    customModelInput.focus();
+                    return;
+                }
+                newModel = customModel;
+            }
 
             GM_setValue(CONFIG.API_KEY_KEY, newKey);
             GM_setValue(CONFIG.API_ENDPOINT_KEY, newEndpoint);
@@ -1777,6 +2014,177 @@
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
         };
+    }
+
+    // ==================== 错误诊断和故障排查 ====================
+    function showErrorDiagnosis(error, endpoint, modelName) {
+        const errorMsg = error.message || '未知错误';
+        let diagnosis = `❌ 连接失败\n\n错误信息：${errorMsg}\n\n`;
+
+        // 提取域名用于诊断
+        let domain = '';
+        try {
+            const url = new URL(endpoint);
+            domain = url.hostname;
+        } catch (e) {
+            domain = endpoint;
+        }
+
+        // 根据错误类型提供诊断
+        if (errorMsg.includes('网络请求失败') || errorMsg.includes('Tampermonkey')) {
+            diagnosis += `🔍 检测到 Tampermonkey CORS 限制问题！
+
+⚠️ 核心原因：
+您使用的 API 域名 "${domain}" 未在脚本的 @connect 白名单中。
+
+✅ 立即解决方法（2选1）：
+
+【方法1 - 手动添加域名（推荐）】
+1. 点击浏览器右上角 Tampermonkey 图标
+2. 点击"管理面板"
+3. 找到"Vercel 汉化 (AI 增强版)"，点击编辑
+4. 在脚本开头找到 @connect 部分
+5. 添加一行：// @connect ${domain}
+6. 保存脚本（Ctrl+S）
+7. 刷新页面重试
+
+【方法2 - 临时允许所有域名】
+1. 打开 Tampermonkey 管理面板
+2. 点击"设置"标签
+3. 找到"安全"部分
+4. 将 "@connect 策略" 改为 "允许所有域名"
+⚠️ 注意：此方法降低安全性，仅建议测试使用
+
+📌 当前配置：
+   API端点: ${endpoint}
+   域名: ${domain}
+
+💡 添加后效果：
+脚本头部会包含：
+// @connect ${domain}`;
+        } else if (errorMsg.includes('请求超时')) {
+            diagnosis += `🔍 可能原因：
+1. 网络延迟过高
+2. API服务器响应缓慢
+3. 防火墙拦截导致超时
+
+💡 解决方法：
+1. 检查网络连接质量
+2. 更换速度更快的API端点
+3. 联系API服务商确认服务状态`;
+        } else if (errorMsg.includes('API 配额已用完')) {
+            diagnosis += `🔍 原因：API调用次数已达上限
+
+💡 解决方法：
+1. 等待配额重置（通常为每月1日）
+2. 升级到付费计划
+3. 更换其他API密钥或服务商`;
+        } else if (errorMsg.includes('API 密钥无效')) {
+            diagnosis += `🔍 原因：API密钥格式错误或已失效
+
+💡 解决方法：
+1. 重新检查API密钥是否完整复制
+2. 确认API密钥未过期
+3. 在API服务商后台重新生成密钥`;
+        } else if (errorMsg.includes('HTTP')) {
+            diagnosis += `🔍 原因：服务器返回错误状态码
+
+💡 解决方法：
+1. 检查API端点是否正确
+2. 确认所选模型名称是否正确
+   当前: ${modelName}
+3. 查看浏览器控制台获取详细错误信息`;
+        }
+
+        diagnosis += `\n\n📝 详细日志请查看浏览器控制台（F12）`;
+
+        alert(diagnosis);
+    }
+
+    function showTroubleshootGuide() {
+        const guide = `🔧 Vercel 汉化插件 - 故障排查指南
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ 最常见问题：自定义 API 域名 CORS 错误
+
+如果您使用自定义 API 端点（如中转服务），需要手动添加域名：
+
+【解决步骤】
+1. 打开 Tampermonkey 管理面板
+2. 找到"Vercel 汉化 (AI 增强版)"，点击编辑
+3. 在脚本开头找到这些行：
+   // @connect api-free.deepl.com
+   // @connect api.deepl.com
+   // @connect api.openai.com
+   // @connect api.anthropic.com
+   // @connect *
+
+4. 在 // @connect * 这行之前添加您的域名：
+   // @connect your-domain.com
+
+5. 保存脚本（Ctrl+S 或 Cmd+S）
+6. 刷新页面重试
+
+【示例】
+如果您的 API 地址是：https://api.example.com/v1/chat/completions
+则添加：// @connect api.example.com
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ 检查基础配置
+   ✓ API密钥是否正确填写
+   ✓ API端点URL是否完整（需包含 https://）
+   ✓ 翻译模型是否选择正确
+
+2️⃣ Tampermonkey 设置检查
+   ✓ 确认脚本已启用
+   ✓ 检查 @connect 是否包含您的 API 域名
+   ✓ 尝试在设置中允许所有域名（测试用）
+
+3️⃣ 网络连接测试
+   ✓ 尝试在浏览器中直接访问API端点
+   ✓ 检查是否有VPN/代理干扰
+   ✓ 关闭广告拦截器重试
+
+4️⃣ API服务商特定问题
+
+   【DeepL】
+   • 免费版端点：https://api-free.deepl.com/v2/translate
+   • 付费版端点：https://api.deepl.com/v2/translate
+   • 获取密钥：https://www.deepl.com/pro-api
+
+   【OpenAI】
+   • 端点：https://api.openai.com/v1/chat/completions
+   • 模型示例：gpt-4o-mini, gpt-3.5-turbo
+   • 获取密钥：https://platform.openai.com/api-keys
+
+   【Claude (Anthropic)】
+   • 端点：https://api.anthropic.com/v1/messages
+   • 模型示例：claude-3-haiku-20240307
+   • 获取密钥：https://console.anthropic.com/
+
+   【自定义中转/第三方API】
+   • 必须手动添加域名到 @connect 列表
+   • 确认中转服务支持 OpenAI 兼容格式
+   • 选择正确的模型名称
+
+5️⃣ 常见错误代码
+   • 403：API密钥无效
+   • 429：配额已用完或请求过快
+   • 500：API服务器错误
+   • 网络请求失败：通常是 @connect 限制
+   • CORS错误：100% 是 @connect 问题
+
+6️⃣ 仍然无法解决？
+   • 打开浏览器控制台（F12）查看详细错误
+   • 使用"测试连接"功能获取诊断信息
+   • 访问项目 GitHub 提交 Issue
+   • 确保 Tampermonkey 版本是最新的
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        alert(guide);
     }
 
     // ==================== DOM 翻译逻辑 ====================
@@ -1877,6 +2285,9 @@
         // 注入样式
         injectStyles();
 
+        // 初始化可见性观察器
+        initVisibilityObserver();
+
         // 初始化翻译队列
         translationQueue = new TranslationQueue(processBatch, CONFIG.QUEUE_DELAY, CONFIG.BATCH_SIZE);
         updateProgressUI();
@@ -1916,6 +2327,7 @@
         console.log(`- 核心术语: ${CORE_TERMS.size} 条`);
         console.log(`- 缓存: ${cache.cache.size} 条`);
         console.log(`- AI翻译: ${GM_getValue(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
+        console.log(`- 可见区域翻译: 已启用`);
     }
 
     // 页面加载完成后初始化
