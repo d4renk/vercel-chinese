@@ -2,7 +2,7 @@
 // @name        Vercel 汉化 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 汉化 Vercel 界面 (支持 AI 自动翻译)
-// @version     0.6.0
+// @version     0.6.17
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*.vercel.app/*
@@ -13,6 +13,7 @@
 // @grant       GM_getValue
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
+// @grant       GM_setClipboard
 // @connect     *
 // @run-at      document-end
 // ==/UserScript==
@@ -35,7 +36,8 @@
         DEFAULT_ENDPOINT: 'https://api-free.deepl.com/v2/translate',
         DEFAULT_MODEL: 'deepl',
         HISTORY_KEY: 'vc_translate_history_v1',
-        HISTORY_MAX: 100
+        HISTORY_MAX: 100,
+        DEBUG_ENABLED_KEY: 'vc_debug_enabled'
     };
 
     // ==================== UI 样式定义 ====================
@@ -642,6 +644,9 @@
         ['View Edge Function Logs', '查看边缘函数日志'],
         ['Runtime Logs', '运行时日志'],
         ['View Runtime Logs', '查看运行时日志'],
+        ['Drains', '转发端点'],
+        ['drains', '转发端点'],
+        ['Log Drains', '日志转发端点'],
         ['API Endpoints', 'API端点'],
         ['Serverless Functions', '无服务器函数'],
         ['Edge Functions', '边缘函数'],
@@ -1008,10 +1013,9 @@
         }
 
         enqueue(item) {
-            // 去重
-            if (!this.queue.some(q => q.text === item.text)) {
-                this.queue.push(item);
-            }
+            // 🔧 修复：不要去重，保留所有同文本节点的回调
+            // 原因：processBatch 会对同文本分组处理，去重会导致部分节点永远不被翻译
+            this.queue.push(item);
 
             // 防抖
             clearTimeout(this.timer);
@@ -1051,6 +1055,21 @@
     let visibilityObserver = null;
     const pendingElements = new WeakMap(); // 存储待翻译的元素和回调
 
+    // 🔧 修复：SPA 路由切换支持
+    let mutationQueue = [];  // 累积 mutation 队列，避免节流丢失
+    let mutationTimer = null;
+    let routeTranslateTimer = null;
+    let historyHooked = false;
+
+    // 🔧 修复：防止 characterData 死循环的自触发保护
+    const translatingNodes = new WeakSet(); // 标记正在被翻译的节点
+    const translatedNodes = new WeakSet(); // 标记已完成翻译的节点（永久）
+    const nodeTranslationMap = new WeakMap(); // 记录节点原文与译文，用于回退恢复
+
+    // 🔧 修复：定期检查懒加载内容
+    let periodicCheckTimer = null;
+    let lastCheckTime = 0;
+
     // ==================== 可见性检测 ====================
     function initVisibilityObserver() {
         if (visibilityObserver) return;
@@ -1058,12 +1077,18 @@
         visibilityObserver = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
-                    // 元素进入可见区域，执行翻译
+                    // 元素进入可见区域，执行所有翻译回调
                     const element = entry.target;
-                    const callback = pendingElements.get(element);
+                    const callbacks = pendingElements.get(element);
 
-                    if (callback) {
-                        callback();
+                    if (callbacks && callbacks.length > 0) {
+                        // 执行所有回调
+                        callbacks.forEach(callback => {
+                            if (typeof callback === 'function') {
+                                callback();
+                            }
+                        });
+                        // 清理并停止观察
                         pendingElements.delete(element);
                         visibilityObserver.unobserve(element);
                     }
@@ -1100,6 +1125,67 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    // 工具函数：检查是否启用调试模式
+    function isDebugEnabled() {
+        return GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false);
+    }
+
+    // 工具函数：脱敏处理API密钥
+    function maskKey(key) {
+        if (!key) return '';
+        if (key.length <= 8) return '*'.repeat(key.length);
+        return `${key.slice(0, 4)}...${key.slice(-2)}`;
+    }
+
+    // 工具函数：调试日志输出
+    function logDebug(label, payload) {
+        if (!isDebugEnabled()) return;
+        const ts = new Date().toISOString();
+        console.log(`[Vercel汉化][DEBUG] ${ts}`, label, payload);
+    }
+
+    function tryCopy(text) {
+        if (typeof GM_setClipboard === 'function') {
+            GM_setClipboard(text);
+            return true;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => {});
+            return true;
+        }
+        return false;
+    }
+
+    function downloadText(filename, text) {
+        const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    function exportDictionaryJson() {
+        try {
+            const dict = {};
+            cache.cache.forEach((item, key) => {
+                const value = item && typeof item === 'object' && 'value' in item ? item.value : item;
+                if (!value || value === key) return;
+                dict[String(key)] = String(value);
+            });
+            const json = JSON.stringify(dict, null, 2);
+            tryCopy(json);
+            downloadText('vc-ai-cache.json', json);
+            alert(`成功导出 ${Object.keys(dict).length} 条翻译到 vc-ai-cache.json\n\n已同时复制到剪贴板`);
+        } catch (err) {
+            console.error('[Vercel汉化] 词典导出失败:', err);
+            alert(`导出失败: ${err.message}`);
+        }
+    }
+
     // 核心翻译函数（单次请求）
     async function translateRequest(texts, apiKey, endpoint, modelName) {
 
@@ -1108,19 +1194,32 @@
             // DeepL API 格式
             const params = texts.map(t => `text=${encodeURIComponent(t)}`).join('&');
             const data = `${params}&target_lang=ZH`;
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': `DeepL-Auth-Key ${apiKey}`
+            };
+
+            // 调试输出：DeepL 请求
+            logDebug('DeepL 请求', {
+                method: 'POST',
+                url: endpoint,
+                headers: {
+                    'Content-Type': headers['Content-Type'],
+                    'Authorization': `DeepL-Auth-Key ${maskKey(apiKey)}`
+                },
+                body: data
+            });
 
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: 'POST',
                     url: endpoint,
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Authorization': `DeepL-Auth-Key ${apiKey}`
-                    },
+                    headers: headers,
                     data: data,
                     timeout: 10000,
                     onload: (response) => {
-                        console.log('[Vercel汉化] DeepL API 响应:', {
+                        // 调试输出：DeepL 响应
+                        logDebug('DeepL 响应', {
                             status: response.status,
                             statusText: response.statusText,
                             headers: response.responseHeaders,
@@ -1152,16 +1251,26 @@
                         }
                     },
                     onerror: (err) => {
-                        console.error('[Vercel汉化] DeepL 网络错误，完整信息:', {
+                        const errorInfo = {
                             error: err,
                             readyState: err.readyState,
                             status: err.status,
                             responseText: err.responseText,
                             responseHeaders: err.responseHeaders
-                        });
+                        };
+
+                        // 调试输出：DeepL 网络错误
+                        logDebug('DeepL 网络错误', errorInfo);
+
+                        console.error('[Vercel汉化] DeepL 网络错误，完整信息:', errorInfo);
                         reject(new Error(`网络请求失败 - 请检查：\n1. API端点URL是否正确\n2. 网络连接是否正常\n3. 是否需要配置代理\n4. Tampermonkey是否允许跨域请求`));
                     },
-                    ontimeout: () => reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'))
+                    ontimeout: () => {
+                        // 调试输出：DeepL 请求超时
+                        logDebug('DeepL 请求超时', { endpoint, timeout: 10000 });
+
+                        reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'));
+                    }
                 });
             });
         } else {
@@ -1169,26 +1278,40 @@
             // 🔧 修复：批量处理所有文本
             const batchPrompt = texts.map((t, i) => `${i + 1}. ${t}`).join('\n');
             const systemMessage = '你是一个专业的技术翻译助手。请将以下编号的英文文本逐行翻译成中文，保持编号格式，仅返回翻译结果，不要添加解释。';
+            const payload = {
+                model: modelName,
+                messages: [
+                    { role: 'system', content: systemMessage },
+                    { role: 'user', content: batchPrompt }
+                ],
+                temperature: 0.3
+            };
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            };
+
+            // 调试输出：OpenAI 请求
+            logDebug('OpenAI 兼容 API 请求', {
+                method: 'POST',
+                url: endpoint,
+                headers: {
+                    'Content-Type': headers['Content-Type'],
+                    'Authorization': `Bearer ${maskKey(apiKey)}`
+                },
+                body: payload
+            });
 
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: 'POST',
                     url: endpoint,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`
-                    },
-                    data: JSON.stringify({
-                        model: modelName,
-                        messages: [
-                            { role: 'system', content: systemMessage },
-                            { role: 'user', content: batchPrompt }
-                        ],
-                        temperature: 0.3
-                    }),
+                    headers: headers,
+                    data: JSON.stringify(payload),
                     timeout: 15000,
                     onload: (response) => {
-                        console.log('[Vercel汉化] OpenAI 兼容 API 响应:', {
+                        // 调试输出：OpenAI 响应
+                        logDebug('OpenAI 兼容 API 响应', {
                             status: response.status,
                             statusText: response.statusText,
                             headers: response.responseHeaders,
@@ -1232,16 +1355,26 @@
                         }
                     },
                     onerror: (err) => {
-                        console.error('[Vercel汉化] OpenAI 兼容 API 网络错误，完整信息:', {
+                        const errorInfo = {
                             error: err,
                             readyState: err.readyState,
                             status: err.status,
                             responseText: err.responseText,
                             responseHeaders: err.responseHeaders
-                        });
+                        };
+
+                        // 调试输出：OpenAI 网络错误
+                        logDebug('OpenAI 兼容 API 网络错误', errorInfo);
+
+                        console.error('[Vercel汉化] OpenAI 兼容 API 网络错误，完整信息:', errorInfo);
                         reject(new Error(`网络请求失败 - 请检查：\n1. API端点URL是否正确\n2. 网络连接是否正常\n3. 是否需要配置代理\n4. Tampermonkey是否允许跨域请求`));
                     },
-                    ontimeout: () => reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'))
+                    ontimeout: () => {
+                        // 调试输出：OpenAI 请求超时
+                        logDebug('OpenAI 兼容 API 请求超时', { endpoint, timeout: 15000 });
+
+                        reject(new Error('请求超时 - API响应时间过长，请检查网络或更换API端点'));
+                    }
                 });
             });
         }
@@ -1414,9 +1547,10 @@
     function ensureProgressElement() {
         if (progressElement) return progressElement;
 
-        // ✅ 使用 Vercel 风格的进度悬浮窗
+        // ✅ 使用 Vercel 风格的进度悬浮窗（禁止翻译）
         progressElement = document.createElement('div');
         progressElement.id = 'vc-progress-floating';
+        progressElement.setAttribute('data-do-not-translate', 'true'); // 禁止翻译
 
         const spinner = document.createElement('div');
         spinner.className = 'vc-spinner';
@@ -1439,6 +1573,15 @@
     }
 
     function updateProgressUI() {
+        // 🔧 修复：没有翻译任务时不显示进度浮窗
+        if (progressState.total === 0) {
+            // 隐藏已存在的浮窗
+            if (progressElement && progressElement.classList.contains('visible')) {
+                progressElement.classList.remove('visible');
+            }
+            return;
+        }
+
         const el = ensureProgressElement();
         const textEl = el.querySelector('#vc-progress-text');
         if (textEl) {
@@ -1517,12 +1660,33 @@
     }
 
     // ==================== 核心翻译函数 ====================
+    // 检测是否包含中文字符
+    function containsChinese(text) {
+        return /[\u4e00-\u9fa5]/.test(text);
+    }
+
+    // 检测是否主要是中文（中文字符占比超过30%）
+    function isPrimarilyChinese(text) {
+        const chineseChars = text.match(/[\u4e00-\u9fa5]/g);
+        if (!chineseChars) return false;
+        const ratio = chineseChars.length / text.length;
+        return ratio > 0.3;
+    }
+
     function translateText(text, context, applyCallback) {
         if (!text || !text.trim()) return;
+
+        // 0. 过滤中文内容 - 如果包含中文就不翻译
+        if (containsChinese(text)) {
+            applyCallback(text);
+            return;
+        }
 
         // 1. 检查核心术语
         const coreHit = CORE_TERMS.get(text);
         if (coreHit) {
+            // 🔧 修复：核心术语翻译后写入缓存，保证 DOM 重新渲染后能稳定保持中文状态
+            cache.set(text, coreHit);
             applyCallback(coreHit);
             return;
         }
@@ -1596,14 +1760,74 @@
         if (!node || !node.nodeValue || !node.nodeValue.trim()) return;
         if (node.parentNode && shouldIgnoreNode(node.parentNode)) return;
 
+        // 🔧 修复：跳过已翻译的节点，防止重复翻译
+        // 但如果节点内容变回了英文（可能被框架重置），则需要重新翻译
+        if (translatedNodes.has(node)) {
+            // 如果节点现在是中文，说明翻译还在，跳过
+            if (node.nodeValue && isPrimarilyChinese(node.nodeValue)) {
+                logDebug('translateTextNode 跳过', '节点已翻译过且保持中文');
+                return;
+            }
+            // 如果节点现在是英文（且之前翻译过），说明被还原了，允许重新翻译
+            logDebug('translateTextNode 重新激活', '节点曾被翻译但当前为英文');
+        }
+
         const originalText = node.nodeValue.trim();
         const parentElement = node.parentNode;
 
         // 定义翻译执行函数
         const doTranslate = () => {
+            const currentText = node.nodeValue ? node.nodeValue.trim() : '';
+
+            // 🔧 调试日志：记录翻译尝试
+            logDebug('translateTextNode 调用', {
+                originalText,
+                currentText,
+                isSame: originalText === currentText,
+                nodeExists: !!node.parentNode
+            });
+
+            // 🔧 安全检查：如果节点已被移除或文本已改变，跳过翻译
+            if (!node.parentNode) {
+                logDebug('translateTextNode 跳过', '节点已被移除');
+                return;
+            }
+
+            if (currentText !== originalText) {
+                logDebug('translateTextNode 跳过', `文本已改变: "${originalText}" → "${currentText}"`);
+                return;
+            }
+
             translateText(originalText, { type: 'textNode' }, (translated) => {
                 if (translated && translated !== originalText) {
-                    node.nodeValue = node.nodeValue.replace(originalText, translated);
+                    // 🔧 调试日志：记录翻译应用
+                    logDebug('应用翻译', {
+                        原文: originalText,
+                        译文: translated,
+                        当前值: node.nodeValue
+                    });
+
+                    // 🔧 修复：标记节点为正在翻译，避免触发 characterData 循环
+                    translatingNodes.add(node);
+
+                    // 🔧 修复：使用全局替换，避免只替换首次匹配
+                    const fullText = node.nodeValue;
+                    if (fullText && fullText.trim() === originalText) {
+                        // 完全匹配，使用正则全局替换
+                        const escapedOriginal = originalText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        node.nodeValue = fullText.replace(new RegExp(escapedOriginal, 'g'), translated);
+
+                        // 记录原文与译文，便于后续回退恢复
+                        nodeTranslationMap.set(node, { original: originalText, translated: translated });
+
+                        // 🔧 修复：永久标记为已翻译，防止定期检查重复翻译
+                        translatedNodes.add(node);
+                    } else {
+                        logDebug('翻译应用失败', `节点值已改变: "${fullText}"`);
+                    }
+
+                    // 🔧 使用 setTimeout 延迟移除标记，确保 mutation 已处理
+                    setTimeout(() => translatingNodes.delete(node), 50);
                 }
             });
         };
@@ -1614,10 +1838,14 @@
             doTranslate();
         } else if (parentElement) {
             // 延迟翻译，等待进入可见区域
-            pendingElements.set(parentElement, doTranslate);
-            if (visibilityObserver) {
-                visibilityObserver.observe(parentElement);
+            // 修复：支持同一元素多个回调
+            if (!pendingElements.has(parentElement)) {
+                pendingElements.set(parentElement, []);
+                if (visibilityObserver) {
+                    visibilityObserver.observe(parentElement);
+                }
             }
+            pendingElements.get(parentElement).push(doTranslate);
         }
     }
 
@@ -1642,10 +1870,14 @@
             doTranslate();
         } else {
             // 延迟翻译，等待进入可见区域
-            pendingElements.set(element, doTranslate);
-            if (visibilityObserver) {
-                visibilityObserver.observe(element);
+            // 修复：支持同一元素多个回调
+            if (!pendingElements.has(element)) {
+                pendingElements.set(element, []);
+                if (visibilityObserver) {
+                    visibilityObserver.observe(element);
+                }
             }
+            pendingElements.get(element).push(doTranslate);
         }
     }
 
@@ -1655,6 +1887,7 @@
         const currentEndpoint = GM_getValue(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
         const currentModel = GM_getValue(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
         const aiEnabled = GM_getValue(CONFIG.AI_ENABLED_KEY, false);
+        const debugEnabled = GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false);
 
         // ✅ 使用 DOM API 避免 XSS (Vercel风格重构)
         const overlay = document.createElement('div');
@@ -1729,6 +1962,42 @@
         aiSwitchRow.appendChild(aiInfo);
         aiSwitchRow.appendChild(aiSwitch);
         aiGroup.appendChild(aiSwitchRow);
+
+        // 1.1 调试模式开关
+        const debugSwitchRow = document.createElement('div');
+        debugSwitchRow.className = 'vc-switch-row';
+
+        const debugInfo = document.createElement('div');
+        debugInfo.className = 'vc-switch-info';
+
+        const debugTitle = document.createElement('div');
+        debugTitle.className = 'vc-switch-title';
+        debugTitle.textContent = '调试模式';
+
+        const debugDesc = document.createElement('div');
+        debugDesc.className = 'vc-switch-desc';
+        debugDesc.textContent = '在控制台输出请求与响应详情';
+
+        debugInfo.appendChild(debugTitle);
+        debugInfo.appendChild(debugDesc);
+
+        const debugSwitch = document.createElement('label');
+        debugSwitch.className = 'vc-switch';
+
+        const debugCheckbox = document.createElement('input');
+        debugCheckbox.type = 'checkbox';
+        debugCheckbox.id = 'vc-debug-enabled';
+        debugCheckbox.checked = debugEnabled;
+
+        const debugSlider = document.createElement('span');
+        debugSlider.className = 'vc-slider';
+
+        debugSwitch.appendChild(debugCheckbox);
+        debugSwitch.appendChild(debugSlider);
+
+        debugSwitchRow.appendChild(debugInfo);
+        debugSwitchRow.appendChild(debugSwitch);
+        aiGroup.appendChild(debugSwitchRow);
 
         // 2. 模型选择
         const modelGroup = document.createElement('div');
@@ -1994,6 +2263,7 @@
             const newEndpoint = endpointInput.value.trim();
             let newModel = modelSelect.value;
             const newEnabled = aiCheckbox.checked;
+            const newDebugEnabled = debugCheckbox.checked;
 
             // 如果选择了自定义模型，使用自定义输入框的值
             if (newModel === 'custom') {
@@ -2010,6 +2280,7 @@
             GM_setValue(CONFIG.API_ENDPOINT_KEY, newEndpoint);
             GM_setValue(CONFIG.MODEL_NAME_KEY, newModel);
             GM_setValue(CONFIG.AI_ENABLED_KEY, newEnabled);
+            GM_setValue(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2258,11 +2529,79 @@
                 }
             });
 
-            // 处理字符变更
+            // 🔧 修复：保留 characterData 监听但增加保护条件
+            // 原因：实时更新的内容（计数器、状态等）需要重新翻译
+            // 保护：跳过已翻译为中文的内容，避免死循环
             if (mutation.type === 'characterData') {
-                if (mutation.target && mutation.target.nodeValue && mutation.target.nodeValue.trim() &&
-                    !shouldIgnoreNode(mutation.target.parentNode)) {
-                    translateTextNode(mutation.target);
+                const target = mutation.target;
+                if (target && target.nodeValue && target.nodeValue.trim() &&
+                    !shouldIgnoreNode(target.parentNode)) {
+
+                    // 🔧 修复：跳过正在被翻译的节点，防止死循环
+                    if (translatingNodes.has(target)) {
+                        logDebug('characterData 跳过', '节点正在被翻译');
+                        return;
+                    }
+
+                    const oldValue = typeof mutation.oldValue === 'string' ? mutation.oldValue : '';
+                    const newValue = target.nodeValue;
+                    const oldTrimmed = oldValue.trim();
+                    const newTrimmed = newValue.trim();
+
+                    // 🔧 修复：检测中文→英文回退（框架重渲染导致），直接从缓存或节点记录恢复
+                    if (oldTrimmed && isPrimarilyChinese(oldTrimmed) && newTrimmed && !isPrimarilyChinese(newTrimmed)) {
+                        logDebug('characterData 检测到回退', `"${oldTrimmed}" → "${newTrimmed}"`);
+                        const nodeRecord = nodeTranslationMap.get(target);
+                        if (nodeRecord && nodeRecord.original === newTrimmed) {
+                            logDebug('characterData 节点记录恢复', `"${newTrimmed}" → "${nodeRecord.translated}"`);
+                            const escapedText = newTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            target.nodeValue = newValue.replace(new RegExp(escapedText, 'g'), nodeRecord.translated);
+                            return;
+                        }
+                        const cached = cache.get(newTrimmed);
+                        if (cached && cached !== newTrimmed) {
+                            logDebug('characterData 从缓存恢复', `"${newTrimmed}" → "${cached}"`);
+                            // 🔧 使用全局替换
+                            const escapedText = newTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            target.nodeValue = newValue.replace(new RegExp(escapedText, 'g'), cached);
+                            return;
+                        }
+                    }
+
+                    const text = newTrimmed;
+
+                    // 🔧 关键保护：如果包含中文，跳过翻译（避免中文/英文反复横跳）
+                    if (containsChinese(text)) {
+                        logDebug('characterData 跳过', `文本包含中文: "${text}"`);
+                        return;
+                    }
+
+                    // 🔧 修复：仅检查缓存，不再以术语表英文作为"已处理"条件
+                    // 如果缓存命中，直接应用缓存的翻译（避免英文状态被保留）
+                    const cached = cache.get(text);
+                    if (cached) {
+                        logDebug('characterData 命中缓存', `缓存翻译: "${text}" → "${cached}"`);
+
+                        // 如果缓存值与原文相同，说明这个词没有对应的中文翻译，保持原文即可
+                        if (cached === text) {
+                            logDebug('characterData 保持原文', `无中文翻译: "${text}"`);
+                            return;
+                        }
+
+                        // 🔧 修复：使用全局替换，避免只替换首次匹配
+                        const fullText = target.nodeValue;
+                        if (fullText && fullText.trim() === text) {
+                            const escapedText = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            target.nodeValue = fullText.replace(new RegExp(escapedText, 'g'), cached);
+                        } else {
+                            logDebug('characterData 跳过替换', `节点文本不完全匹配: "${fullText}"`);
+                        }
+                        return;
+                    }
+
+                    // 新的英文内容，需要翻译
+                    logDebug('characterData 触发翻译', `新内容: "${text}"`);
+                    translateTextNode(target);
                 }
             }
 
@@ -2276,6 +2615,76 @@
                 }
             }
         });
+    }
+
+    // ==================== SPA 路由切换支持 ====================
+    // 🔧 修复：监听路由变化，在 SPA 切换时触发翻译
+    function scheduleFullPageTranslate(reason) {
+        clearTimeout(routeTranslateTimer);
+        routeTranslateTimer = setTimeout(() => {
+            logDebug('路由翻译触发', reason || 'unknown');
+            replaceText(document.body);
+            // 🔧 路由切换后启动定期检查，处理懒加载内容
+            startPeriodicCheck();
+        }, 300);
+    }
+
+    // 🔧 新增：定期检查未翻译的节点（处理懒加载）
+    function startPeriodicCheck() {
+        // 清除之前的定时器
+        if (periodicCheckTimer) {
+            clearInterval(periodicCheckTimer);
+        }
+
+        let checkCount = 0;
+        const maxChecks = 10; // 最多检查10次（约30秒）
+
+        periodicCheckTimer = setInterval(() => {
+            checkCount++;
+            const now = Date.now();
+
+            // 避免频繁检查（至少间隔3秒）
+            if (now - lastCheckTime < 3000) {
+                return;
+            }
+            lastCheckTime = now;
+
+            logDebug('定期检查懒加载内容', `第 ${checkCount} 次`);
+            replaceText(document.body);
+
+            // 达到最大检查次数后停止
+            if (checkCount >= maxChecks) {
+                clearInterval(periodicCheckTimer);
+                periodicCheckTimer = null;
+                logDebug('定期检查结束', `共检查 ${checkCount} 次`);
+            }
+        }, 3000); // 每3秒检查一次
+    }
+
+    function hookHistoryEvents() {
+        if (historyHooked) return;
+        historyHooked = true;
+
+        const emit = () => window.dispatchEvent(new Event('vc:locationchange'));
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+
+        history.pushState = function(...args) {
+            const result = originalPushState.apply(this, args);
+            emit();
+            return result;
+        };
+
+        history.replaceState = function(...args) {
+            const result = originalReplaceState.apply(this, args);
+            emit();
+            return result;
+        };
+
+        window.addEventListener('popstate', emit);
+        window.addEventListener('hashchange', emit);
+
+        console.log('[Vercel汉化] SPA 路由监听已启用');
     }
 
     // ==================== 初始化 ====================
@@ -2294,25 +2703,36 @@
 
         // 注册菜单命令
         GM_registerMenuCommand('⚙️ 翻译设置', showConfigDialog);
+        GM_registerMenuCommand('📥 导出词典 JSON', exportDictionaryJson);
+
+        // 🔧 修复：监听 SPA 路由变化
+        hookHistoryEvents();
+        window.addEventListener('vc:locationchange', () => scheduleFullPageTranslate('locationchange'));
 
         // 初始翻译
         setTimeout(() => {
             replaceText(document.body);
+            // 🔧 初始加载后也启动定期检查，处理懒加载内容
+            startPeriodicCheck();
         }, 800);
 
         // 监听 DOM 变更
         const bodyObserver = new MutationObserver(mutations => {
-            clearTimeout(window.vcTranslationTimer);
-            window.vcTranslationTimer = setTimeout(() => {
-                processMutations(mutations);
+            // 🔧 修复：累积 mutation 队列，避免节流丢失批次
+            mutationQueue.push(...mutations);
+            clearTimeout(mutationTimer);
+            mutationTimer = setTimeout(() => {
+                const queued = mutationQueue.splice(0, mutationQueue.length);
+                processMutations(queued);
             }, 100);
         });
 
         bodyObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-            attributes: true,
+            childList: true,        // 监听子节点增删
+            subtree: true,          // 监听所有后代节点
+            characterData: true,    // 🔧 恢复监听文本变化（已添加保护避免死循环）
+            characterDataOldValue: true, // 🔧 修复：获取 oldValue 以识别中文→英文回退
+            attributes: true,       // 监听属性变化
             attributeFilter: ['title', 'placeholder', 'aria-label']
         });
 
@@ -2328,6 +2748,7 @@
         console.log(`- 缓存: ${cache.cache.size} 条`);
         console.log(`- AI翻译: ${GM_getValue(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
         console.log(`- 可见区域翻译: 已启用`);
+        console.log(`- 调试模式: ${GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
     }
 
     // 页面加载完成后初始化
