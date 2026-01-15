@@ -28,7 +28,10 @@
         CACHE_KEY_PREFIX: 'vc_ai_cache_domain_', // 按域名存储缓存的前缀
         CACHE_TTL_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
         CACHE_MAX: Number.MAX_SAFE_INTEGER,
-        BATCH_SIZE: 20,
+        BATCH_SIZE_KEY: 'vc_batch_size', // 批量翻译单词数
+        CONCURRENCY_KEY: 'vc_concurrency', // 并发翻译数
+        DEFAULT_BATCH_SIZE: 20, // 默认每批 20 个单词
+        DEFAULT_CONCURRENCY: 2, // 默认 2 个并发
         QUEUE_DELAY: 100, // ms
         LANG: 'zh-CN',
         DEFAULT_ENDPOINT: 'https://api-free.deepl.com/v2/translate',
@@ -623,13 +626,14 @@
 
     // ==================== 翻译队列实现 ====================
     class TranslationQueue {
-        constructor(processor, delay, batchSize) {
+        constructor(processor, delay, batchSize, concurrency = 2) {
             this.processor = processor;
             this.delay = delay;
             this.batchSize = batchSize;
+            this.concurrency = concurrency; // 并发数
             this.queue = [];
             this.timer = null;
-            this.processing = false;
+            this.activeCount = 0; // 当前活跃的并发任务数
         }
 
         enqueue(item) {
@@ -643,24 +647,26 @@
         }
 
         async flush() {
-            if (this.processing || this.queue.length === 0) return;
+            // 🔧 并发处理：只要还有队列且未达到并发上限，就继续处理
+            while (this.queue.length > 0 && this.activeCount < this.concurrency) {
+                this.activeCount++;
 
-            this.processing = true;
+                // 取出批量
+                const batch = this.queue.splice(0, this.batchSize);
 
-            // 取出批量
-            const batch = this.queue.splice(0, this.batchSize);
+                // 异步处理批次（不阻塞）
+                this.processor(batch)
+                    .catch(e => {
+                        console.error('[网页翻译] 批量翻译失败:', e);
+                    })
+                    .finally(() => {
+                        this.activeCount--;
 
-            try {
-                await this.processor(batch);
-            } catch (e) {
-                console.error('[网页翻译] 批量翻译失败:', e);
-            } finally {
-                this.processing = false;
-
-                // 如果还有剩余，继续处理
-                if (this.queue.length > 0) {
-                    this.timer = setTimeout(() => this.flush(), this.delay);
-                }
+                        // 如果还有剩余，继续处理
+                        if (this.queue.length > 0) {
+                            this.timer = setTimeout(() => this.flush(), this.delay);
+                        }
+                    });
             }
         }
     }
@@ -1720,16 +1726,55 @@
         keyLabel.className = 'vc-label';
         keyLabel.textContent = 'API 密钥';
 
+        const keyInputWrapper = document.createElement('div');
+        keyInputWrapper.style.display = 'flex';
+        keyInputWrapper.style.gap = '8px';
+
         const keyInput = document.createElement('input');
         keyInput.type = 'password';
         keyInput.id = 'vc-api-key';
         keyInput.className = 'vc-input';
         keyInput.value = currentKey;
         keyInput.placeholder = '请输入您的 API 密钥';
+        keyInput.style.flex = '1';
+
+        const copyKeyBtn = document.createElement('button');
+        copyKeyBtn.className = 'vc-btn vc-btn-secondary';
+        copyKeyBtn.textContent = '复制';
+        copyKeyBtn.style.minWidth = '80px';
+        copyKeyBtn.onclick = () => {
+            const keyValue = keyInput.value;
+            if (!keyValue) {
+                alert('⚠️ 没有密钥可复制');
+                return;
+            }
+
+            // 使用 GM_setClipboard 复制到剪贴板
+            if (typeof GM_setClipboard !== 'undefined') {
+                GM_setClipboard(keyValue);
+                copyKeyBtn.textContent = '✓ 已复制';
+                setTimeout(() => {
+                    copyKeyBtn.textContent = '复制';
+                }, 2000);
+            } else {
+                // 降级方案：使用原生 API
+                navigator.clipboard.writeText(keyValue).then(() => {
+                    copyKeyBtn.textContent = '✓ 已复制';
+                    setTimeout(() => {
+                        copyKeyBtn.textContent = '复制';
+                    }, 2000);
+                }).catch(() => {
+                    alert('❌ 复制失败，请手动复制');
+                });
+            }
+        };
+
+        keyInputWrapper.appendChild(keyInput);
+        keyInputWrapper.appendChild(copyKeyBtn);
 
         const keyHint = document.createElement('div');
         keyHint.className = 'vc-hint';
-        
+
         const keyHintText = document.createTextNode('获取免费密钥: ');
         const keyLink = document.createElement('a');
         keyLink.href = 'https://www.deepl.com/pro-api';
@@ -1741,10 +1786,72 @@
         keyHint.appendChild(keyLink);
 
         keyGroup.appendChild(keyLabel);
-        keyGroup.appendChild(keyInput);
+        keyGroup.appendChild(keyInputWrapper);
         keyGroup.appendChild(keyHint);
 
-        // 5. 工具栏
+        // 5. 速度设置
+        const speedGroup = document.createElement('div');
+        speedGroup.className = 'vc-form-group';
+
+        const speedLabel = document.createElement('label');
+        speedLabel.className = 'vc-label';
+        speedLabel.textContent = '翻译速度设置';
+
+        // 批量大小设置
+        const batchSizeWrapper = document.createElement('div');
+        batchSizeWrapper.style.marginBottom = '12px';
+
+        const batchSizeLabel = document.createElement('label');
+        batchSizeLabel.textContent = '每批翻译单词数：';
+        batchSizeLabel.style.fontSize = '13px';
+        batchSizeLabel.style.color = 'var(--vc-accents-5)';
+        batchSizeLabel.style.display = 'block';
+        batchSizeLabel.style.marginBottom = '4px';
+
+        const batchSizeInput = document.createElement('input');
+        batchSizeInput.type = 'number';
+        batchSizeInput.id = 'vc-batch-size';
+        batchSizeInput.className = 'vc-input';
+        batchSizeInput.value = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        batchSizeInput.min = '5';
+        batchSizeInput.max = '100';
+        batchSizeInput.placeholder = '默认 20';
+
+        batchSizeWrapper.appendChild(batchSizeLabel);
+        batchSizeWrapper.appendChild(batchSizeInput);
+
+        // 并发数设置
+        const concurrencyWrapper = document.createElement('div');
+
+        const concurrencyLabel = document.createElement('label');
+        concurrencyLabel.textContent = '并发翻译数：';
+        concurrencyLabel.style.fontSize = '13px';
+        concurrencyLabel.style.color = 'var(--vc-accents-5)';
+        concurrencyLabel.style.display = 'block';
+        concurrencyLabel.style.marginBottom = '4px';
+
+        const concurrencyInput = document.createElement('input');
+        concurrencyInput.type = 'number';
+        concurrencyInput.id = 'vc-concurrency';
+        concurrencyInput.className = 'vc-input';
+        concurrencyInput.value = GM_getValue(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        concurrencyInput.min = '1';
+        concurrencyInput.max = '10';
+        concurrencyInput.placeholder = '默认 2';
+
+        concurrencyWrapper.appendChild(concurrencyLabel);
+        concurrencyWrapper.appendChild(concurrencyInput);
+
+        const speedHint = document.createElement('div');
+        speedHint.className = 'vc-hint';
+        speedHint.textContent = '提示：增加数值可提高翻译速度，但可能增加 API 消耗';
+
+        speedGroup.appendChild(speedLabel);
+        speedGroup.appendChild(batchSizeWrapper);
+        speedGroup.appendChild(concurrencyWrapper);
+        speedGroup.appendChild(speedHint);
+
+        // 6. 工具栏
         const toolsGroup = document.createElement('div');
         toolsGroup.className = 'vc-tools';
 
@@ -1845,6 +1952,7 @@
         content.appendChild(modelGroup);
         content.appendChild(endpointGroup);
         content.appendChild(keyGroup);
+        content.appendChild(speedGroup);
         content.appendChild(toolsGroup);
         content.appendChild(historyContainer);
 
@@ -1888,6 +1996,8 @@
             let newModel = modelSelect.value;
             const newEnabled = aiCheckbox.checked;
             const newDebugEnabled = debugCheckbox.checked;
+            const newBatchSize = parseInt(batchSizeInput.value) || CONFIG.DEFAULT_BATCH_SIZE;
+            const newConcurrency = parseInt(concurrencyInput.value) || CONFIG.DEFAULT_CONCURRENCY;
 
             // 如果选择了自定义模型，使用自定义输入框的值
             if (newModel === 'custom') {
@@ -1900,11 +2010,26 @@
                 newModel = customModel;
             }
 
+            // 验证速度设置范围
+            if (newBatchSize < 5 || newBatchSize > 100) {
+                alert('⚠️ 批量大小必须在 5-100 之间');
+                batchSizeInput.focus();
+                return;
+            }
+
+            if (newConcurrency < 1 || newConcurrency > 10) {
+                alert('⚠️ 并发数必须在 1-10 之间');
+                concurrencyInput.focus();
+                return;
+            }
+
             GM_setValue(CONFIG.API_KEY_KEY, newKey);
             GM_setValue(CONFIG.API_ENDPOINT_KEY, newEndpoint);
             GM_setValue(CONFIG.MODEL_NAME_KEY, newModel);
             GM_setValue(CONFIG.AI_ENABLED_KEY, newEnabled);
             GM_setValue(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
+            GM_setValue(CONFIG.BATCH_SIZE_KEY, newBatchSize);
+            GM_setValue(CONFIG.CONCURRENCY_KEY, newConcurrency);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2372,7 +2497,9 @@
         initVisibilityObserver();
 
         // 初始化翻译队列
-        translationQueue = new TranslationQueue(processBatch, CONFIG.QUEUE_DELAY, CONFIG.BATCH_SIZE);
+        const batchSize = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        const concurrency = GM_getValue(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        translationQueue = new TranslationQueue(processBatch, CONFIG.QUEUE_DELAY, batchSize, concurrency);
         updateProgressUI();
         // 🔧 修复：监听 SPA 路由变化
         hookHistoryEvents();
