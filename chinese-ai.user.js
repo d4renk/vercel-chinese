@@ -5,7 +5,7 @@
 // @version     1.0.0
 // @author      liyixin21
 // @license     GPL-3.0
-// @match       *
+// @match       *://*/*
 // @icon        data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">🌐</text></svg>
 // @grant       GM_xmlhttpRequest
 // @grant       GM_getValue
