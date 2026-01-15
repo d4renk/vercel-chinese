@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
-// @description 通用网页自动翻译工具 (支持 AI 自动翻译)
-// @version     1.0.0
+// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 已优化缓存命中性能
+// @version     1.1.0
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -573,7 +573,7 @@
             }
         }
 
-        get(key) {
+        get(key, skipLRU = false) {
             const item = this.cache.get(key);
             if (!item) return null;
 
@@ -583,9 +583,13 @@
                 return null;
             }
 
-            // LRU: 移到最后
-            this.cache.delete(key);
-            this.cache.set(key, item);
+            // 🔧 优化：只在必要时维护 LRU 顺序
+            // skipLRU=true 时跳过 delete+set 操作，减少开销
+            if (!skipLRU) {
+                // LRU: 移到最后
+                this.cache.delete(key);
+                this.cache.set(key, item);
+            }
 
             return item.value;
         }
@@ -1318,9 +1322,11 @@
             return;
         }
 
-        // 1. 检查缓存
-        const cached = cache.get(text);
+        // 1. 检查缓存 - 🔧 优化：缓存命中时立即同步应用，跳过队列和可见性检查
+        // 🔧 优化：skipLRU=true 减少缓存维护开销（读场景不需要更新 LRU 顺序）
+        const cached = cache.get(text, true);
         if (cached) {
+            // 🎯 关键优化：直接同步调用回调，不经过队列
             applyCallback(cached);
             return;
         }
@@ -1333,7 +1339,7 @@
             return;
         }
 
-        // 4. 加入队列（异步翻译）
+        // 4. 加入队列（异步翻译） - 仅对缓存未命中的情况
         if (translationQueue) {
             const alreadyPending = pendingTexts.has(text);
             translationQueue.enqueue({
@@ -1402,6 +1408,11 @@
         const originalText = node.nodeValue.trim();
         const parentElement = node.parentNode;
 
+        // 🔧 优化：先检查缓存，如果命中则跳过可见性检查
+        // skipLRU=true 减少缓存维护开销
+        const cached = cache.get(originalText, true);
+        const isCached = !!cached;
+
         // 定义翻译执行函数
         const doTranslate = () => {
             const currentText = node.nodeValue ? node.nodeValue.trim() : '';
@@ -1411,7 +1422,8 @@
                 originalText,
                 currentText,
                 isSame: originalText === currentText,
-                nodeExists: !!node.parentNode
+                nodeExists: !!node.parentNode,
+                isCached: isCached
             });
 
             // 🔧 安全检查：如果节点已被移除或文本已改变，跳过翻译
@@ -1459,12 +1471,14 @@
             });
         };
 
-        // 检查父元素是否在可见区域
-        if (parentElement && isElementVisible(parentElement)) {
-            // 立即翻译
+        // 🎯 关键优化：缓存命中时跳过可见性检查，立即翻译
+        if (isCached) {
+            doTranslate();
+        } else if (parentElement && isElementVisible(parentElement)) {
+            // 缓存未命中且元素可见，立即翻译
             doTranslate();
         } else if (parentElement) {
-            // 延迟翻译，等待进入可见区域
+            // 缓存未命中且元素不可见，延迟翻译，等待进入可见区域
             // 修复：支持同一元素多个回调
             if (!pendingElements.has(parentElement)) {
                 pendingElements.set(parentElement, []);
@@ -1482,6 +1496,11 @@
         const attrValue = element.getAttribute(attrName);
         if (!attrValue || !attrValue.trim()) return;
 
+        // 🔧 优化：先检查缓存，如果命中则跳过可见性检查
+        // skipLRU=true 减少缓存维护开销
+        const cached = cache.get(attrValue, true);
+        const isCached = !!cached;
+
         // 定义翻译执行函数
         const doTranslate = () => {
             translateText(attrValue, { type: 'attribute', attr: attrName }, (translated) => {
@@ -1491,12 +1510,14 @@
             });
         };
 
-        // 检查元素是否在可见区域
-        if (isElementVisible(element)) {
-            // 立即翻译
+        // 🎯 关键优化：缓存命中时跳过可见性检查，立即翻译
+        if (isCached) {
+            doTranslate();
+        } else if (isElementVisible(element)) {
+            // 缓存未命中且元素可见，立即翻译
             doTranslate();
         } else {
-            // 延迟翻译，等待进入可见区域
+            // 缓存未命中且元素不可见，延迟翻译，等待进入可见区域
             // 修复：支持同一元素多个回调
             if (!pendingElements.has(element)) {
                 pendingElements.set(element, []);
@@ -2314,7 +2335,8 @@
                             target.nodeValue = newValue.replace(new RegExp(escapedText, 'g'), nodeRecord.translated);
                             return;
                         }
-                        const cached = cache.get(newTrimmed);
+                        // skipLRU=true 减少缓存维护开销
+                        const cached = cache.get(newTrimmed, true);
                         if (cached && cached !== newTrimmed) {
                             logDebug('characterData 从缓存恢复', `"${newTrimmed}" → "${cached}"`);
                             // 🔧 使用全局替换
@@ -2334,7 +2356,8 @@
 
                     // 🔧 修复：仅检查缓存，不再以术语表英文作为"已处理"条件
                     // 如果缓存命中，直接应用缓存的翻译（避免英文状态被保留）
-                    const cached = cache.get(text);
+                    // skipLRU=true 减少缓存维护开销
+                    const cached = cache.get(text, true);
                     if (cached) {
                         logDebug('characterData 命中缓存', `缓存翻译: "${text}" → "${cached}"`);
 
