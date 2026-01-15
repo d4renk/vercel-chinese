@@ -1204,6 +1204,12 @@
         }
 
         const el = ensureProgressElement();
+
+        // 🔧 修复：确保进度窗口可见（处理 SPA 路由切换场景）
+        if (!el.classList.contains('visible')) {
+            el.classList.add('visible');
+        }
+
         const textEl = el.querySelector('#vc-progress-text');
         if (textEl) {
             textEl.textContent = `翻译进度: 已完成 ${progressState.completed} / 总计 ${progressState.total}`;
@@ -1213,6 +1219,9 @@
         if (progressState.completed >= progressState.total && progressState.total > 0) {
             setTimeout(() => {
                 el.classList.remove('visible');
+                // 🔧 修复：重置进度状态，为下次翻译做准备
+                progressState.total = 0;
+                progressState.completed = 0;
             }, 3000);
         }
     }
