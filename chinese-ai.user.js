@@ -30,7 +30,7 @@
         CACHE_MAX: Number.MAX_SAFE_INTEGER,
         BATCH_SIZE_KEY: 'vc_batch_size', // 批量翻译单词数
         CONCURRENCY_KEY: 'vc_concurrency', // 并发翻译数
-        DEFAULT_BATCH_SIZE: 20, // 默认每批 20 个单词
+        DEFAULT_BATCH_SIZE: 10, // 默认每批 10 个单词
         DEFAULT_CONCURRENCY: 2, // 默认 2 个并发
         QUEUE_DELAY: 100, // ms
         LANG: 'zh-CN',
@@ -1815,7 +1815,7 @@
         batchSizeInput.value = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
         batchSizeInput.min = '5';
         batchSizeInput.max = '100';
-        batchSizeInput.placeholder = '默认 20';
+        batchSizeInput.placeholder = '默认 10';
 
         batchSizeWrapper.appendChild(batchSizeLabel);
         batchSizeWrapper.appendChild(batchSizeInput);
