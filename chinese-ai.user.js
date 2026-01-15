@@ -1628,9 +1628,12 @@
 
         const models = [
             { value: 'deepl', text: 'DeepL (推荐)' },
+            { value: 'gemini-2.0-flash-lite', text: 'Gemini 2.0 Flash Lite (推荐)' },
             { value: 'gpt-4o-mini', text: 'OpenAI GPT-4o-mini' },
             { value: 'gpt-3.5-turbo', text: 'OpenAI GPT-3.5-turbo' },
-            { value: 'claude-3-haiku', text: 'Claude 3 Haiku' },
+            { value: 'claude-3-haiku-20240307', text: 'Claude 3 Haiku' },
+            { value: 'gemini-2.0-flash-exp', text: 'Gemini 2.0 Flash' },
+            { value: 'gemini-1.5-flash', text: 'Gemini 1.5 Flash' },
             { value: 'custom', text: '自定义模型' }
         ];
 
@@ -1657,7 +1660,7 @@
         customModelInput.type = 'text';
         customModelInput.id = 'vc-custom-model';
         customModelInput.className = 'vc-input';
-        customModelInput.placeholder = '例如: gpt-4, claude-3-5-sonnet-20241022';
+        customModelInput.placeholder = '例如: gemini-2.0-flash-lite, gpt-4o-mini, claude-3-5-sonnet-20241022';
         customModelInput.value = !isPresetModel ? currentModel : '';
         customModelInput.style.marginTop = '8px';
         customModelInput.style.display = (!isPresetModel || modelSelect.value === 'custom') ? 'block' : 'none';
@@ -2037,6 +2040,12 @@
    • 付费版端点：https://api.deepl.com/v2/translate
    • 获取密钥：https://www.deepl.com/pro-api
 
+   【Gemini (Google AI) - 推荐小模型】
+   • 端点：https://generativelanguage.googleapis.com/v1beta/chat/completions
+   • 模型示例：gemini-2.0-flash-lite, gemini-2.0-flash-exp, gemini-1.5-flash
+   • 获取密钥：https://aistudio.google.com/apikey
+   • 特点：速度快、成本低、效果好
+
    【OpenAI】
    • 端点：https://api.openai.com/v1/chat/completions
    • 模型示例：gpt-4o-mini, gpt-3.5-turbo
@@ -2051,6 +2060,7 @@
    • 必须手动添加域名到 @connect 列表
    • 确认中转服务支持 OpenAI 兼容格式
    • 选择正确的模型名称
+   • 小模型推荐：gemini-2.0-flash-lite, gpt-4o-mini
 
 5️⃣ 常见错误代码
    • 403：API密钥无效
