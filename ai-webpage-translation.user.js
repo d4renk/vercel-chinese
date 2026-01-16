@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
-// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 已优化缓存命中性能
-// @version     1.1.0
+// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 已优化缓存命中性能，仅对可见元素调用 AI
+// @version     1.2.0
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -1479,19 +1479,12 @@
         if (isCached) {
             doTranslate();
         } else if (parentElement && isElementVisible(parentElement)) {
-            // 缓存未命中且元素可见，立即翻译
+            // 🔧 修改：只对可见元素调用 AI 翻译
+            // 缓存未命中且元素可见，才进行翻译（会调用 AI）
             doTranslate();
-        } else if (parentElement) {
-            // 缓存未命中且元素不可见，延迟翻译，等待进入可见区域
-            // 修复：支持同一元素多个回调
-            if (!pendingElements.has(parentElement)) {
-                pendingElements.set(parentElement, []);
-                if (visibilityObserver) {
-                    visibilityObserver.observe(parentElement);
-                }
-            }
-            pendingElements.get(parentElement).push(doTranslate);
         }
+        // 🔧 修改：移除不可见元素的延迟翻译逻辑
+        // 不可见元素如果缓存未命中，直接跳过，不加入观察队列，不调用 AI
     }
 
     function translateAttribute(element, attrName) {
@@ -1518,19 +1511,12 @@
         if (isCached) {
             doTranslate();
         } else if (isElementVisible(element)) {
-            // 缓存未命中且元素可见，立即翻译
+            // 🔧 修改：只对可见元素调用 AI 翻译
+            // 缓存未命中且元素可见，才进行翻译（会调用 AI）
             doTranslate();
-        } else {
-            // 缓存未命中且元素不可见，延迟翻译，等待进入可见区域
-            // 修复：支持同一元素多个回调
-            if (!pendingElements.has(element)) {
-                pendingElements.set(element, []);
-                if (visibilityObserver) {
-                    visibilityObserver.observe(element);
-                }
-            }
-            pendingElements.get(element).push(doTranslate);
         }
+        // 🔧 修改：移除不可见元素的延迟翻译逻辑
+        // 不可见元素如果缓存未命中，直接跳过，不加入观察队列，不调用 AI
     }
 
     // ==================== 用户配置界面 ====================
