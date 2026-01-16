@@ -1439,19 +1439,19 @@
 
             translateText(originalText, { type: 'textNode' }, (translated) => {
                 if (translated && translated !== originalText) {
-                    // 🔧 调试日志：记录翻译应用
-                    logDebug('应用翻译', {
-                        原文: originalText,
-                        译文: translated,
-                        当前值: node.nodeValue
-                    });
-
                     // 🔧 修复：标记节点为正在翻译，避免触发 characterData 循环
                     translatingNodes.add(node);
 
                     // 🔧 修复：使用全局替换，避免只替换首次匹配
                     const fullText = node.nodeValue;
                     if (fullText && fullText.trim() === originalText) {
+                        // 🔧 调试日志：记录翻译应用
+                        logDebug('应用翻译', {
+                            原文: originalText,
+                            译文: translated,
+                            当前值: fullText
+                        });
+
                         // 完全匹配，使用正则全局替换
                         const escapedOriginal = originalText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                         node.nodeValue = fullText.replace(new RegExp(escapedOriginal, 'g'), translated);
@@ -1460,6 +1460,10 @@
                         nodeTranslationMap.set(node, { original: originalText, translated: translated });
 
                         // 🔧 修复：永久标记为已翻译，防止定期检查重复翻译
+                        translatedNodes.add(node);
+                    } else if (fullText && fullText.trim() === translated) {
+                        // 🔧 优化修复：节点已经是翻译后的文本，静默跳过（可能被缓存命中逻辑已处理）
+                        logDebug('翻译已应用', `节点已是译文: "${translated}"`);
                         translatedNodes.add(node);
                     } else {
                         logDebug('翻译应用失败', `节点值已改变: "${fullText}"`);
