@@ -2,7 +2,7 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 已优化缓存命中性能，仅对可见元素调用 AI
-// @version     1.2.0
+// @version     1.2.1
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -1847,7 +1847,7 @@
         concurrencyInput.className = 'vc-input';
         concurrencyInput.value = GM_getValue(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
         concurrencyInput.min = '1';
-        concurrencyInput.max = '10';
+        concurrencyInput.max = '9999';
         concurrencyInput.placeholder = '默认 2';
 
         concurrencyWrapper.appendChild(concurrencyLabel);
@@ -2028,8 +2028,8 @@
                 return;
             }
 
-            if (newConcurrency < 1 || newConcurrency > 10) {
-                alert('⚠️ 并发数必须在 1-10 之间');
+            if (newConcurrency < 1 || newConcurrency > 9999) {
+                alert('⚠️ 并发数必须在 1-9999 之间');
                 concurrencyInput.focus();
                 return;
             }
