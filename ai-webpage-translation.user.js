@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
-// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 已优化缓存命中性能，仅对可见元素调用 AI
-// @version     1.2.1
+// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±200px 缓冲区）
+// @version     1.3.0
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -683,8 +683,6 @@
     const pendingTexts = new Set();
     const progressState = { total: 0, completed: 0 };
     let progressElement = null;
-    let visibilityObserver = null;
-    const pendingElements = new WeakMap(); // 存储待翻译的元素和回调
 
     // 🔧 修复：SPA 路由切换支持
     let mutationQueue = [];  // 累积 mutation 队列，避免节流丢失
@@ -702,39 +700,8 @@
     let lastCheckTime = 0;
 
     // ==================== 可见性检测 ====================
-    function initVisibilityObserver() {
-        if (visibilityObserver) return;
 
-        visibilityObserver = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    // 元素进入可见区域，执行所有翻译回调
-                    const element = entry.target;
-                    const callbacks = pendingElements.get(element);
-
-                    if (callbacks && callbacks.length > 0) {
-                        // 执行所有回调
-                        callbacks.forEach(callback => {
-                            if (typeof callback === 'function') {
-                                callback();
-                            }
-                        });
-                        // 清理并停止观察
-                        pendingElements.delete(element);
-                        visibilityObserver.unobserve(element);
-                    }
-                }
-            });
-        }, {
-            root: null,
-            rootMargin: '50px', // 提前50px开始加载
-            threshold: 0.01 // 至少1%可见
-        });
-
-        console.log('[网页翻译] IntersectionObserver 已初始化');
-    }
-
-    // 检查元素是否在可见区域
+    // 检查元素是否在可见区域（高灵敏度：±200px 缓冲区）
     function isElementVisible(element) {
         if (!element || !element.getBoundingClientRect) return false;
 
@@ -743,8 +710,8 @@
         const windowWidth = window.innerWidth || document.documentElement.clientWidth;
 
         return (
-            rect.bottom >= -50 &&
-            rect.top <= windowHeight + 50 &&
+            rect.bottom >= -200 &&
+            rect.top <= windowHeight + 200 &&
             rect.right >= 0 &&
             rect.left <= windowWidth
         );
@@ -2505,9 +2472,6 @@
         }
 
         console.log(`[网页翻译] ${domain} 在翻译名单中，开始初始化翻译功能`);
-
-        // 初始化可见性观察器
-        initVisibilityObserver();
 
         // 初始化翻译队列
         const batchSize = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
