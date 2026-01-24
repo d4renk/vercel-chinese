@@ -2,7 +2,7 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±400px 缓冲区）
-// @version     1.3.5
+// @version     1.3.6
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -1162,13 +1162,6 @@
                 return result;
             } catch (error) {
                 lastError = error;
-
-                // 不可重试的错误（配额用完、密钥无效等）
-                const nonRetryableErrors = ['API 配额已用完', 'API 密钥无效'];
-                if (nonRetryableErrors.some(msg => error.message.includes(msg))) {
-                    console.error(`[网页翻译] 不可重试的错误: ${error.message}`);
-                    throw error;
-                }
 
                 // 最后一次尝试失败
                 if (attempt === maxRetries) {
