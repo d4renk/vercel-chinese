@@ -2,7 +2,7 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±400px 缓冲区）
-// @version     1.3.6
+// @version     1.3.9
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -35,6 +35,10 @@
         VISIBILITY_BUFFER_KEY: 'vc_visibility_buffer',
         DEFAULT_VISIBILITY_BUFFER: 400, // 默认可见区域缓冲区(px)
         QUEUE_DELAY: 100, // ms
+        SCROLL_THROTTLE_KEY: 'vc_scroll_throttle_ms',
+        SCROLL_DEBOUNCE_KEY: 'vc_scroll_debounce_ms',
+        SCROLL_THROTTLE_MS: 250,
+        SCROLL_DEBOUNCE_MS: 500,
         LANG: 'zh-CN',
         DEFAULT_ENDPOINT: 'https://api-free.deepl.com/v2/translate',
         DEFAULT_MODEL: 'deepl',
@@ -815,6 +819,9 @@
     // 🔧 修复：定期检查懒加载内容
     let periodicCheckTimer = null;
     let lastCheckTime = 0;
+    let scrollThrottleTimer = null;
+    let scrollDebounceTimer = null;
+    let lastScrollTranslate = 0;
 
     // ==================== 可见性检测 ====================
 
@@ -1993,6 +2000,50 @@
         bufferWrapper.appendChild(bufferLabel);
         bufferWrapper.appendChild(bufferInput);
 
+        const scrollThrottleWrapper = document.createElement('div');
+        scrollThrottleWrapper.style.marginTop = '12px';
+
+        const scrollThrottleLabel = document.createElement('label');
+        scrollThrottleLabel.textContent = '滚动节流(ms)：';
+        scrollThrottleLabel.style.fontSize = '13px';
+        scrollThrottleLabel.style.color = 'var(--vc-accents-5)';
+        scrollThrottleLabel.style.display = 'block';
+        scrollThrottleLabel.style.marginBottom = '4px';
+
+        const scrollThrottleInput = document.createElement('input');
+        scrollThrottleInput.type = 'number';
+        scrollThrottleInput.id = 'vc-scroll-throttle';
+        scrollThrottleInput.className = 'vc-input';
+        scrollThrottleInput.value = getSetting(CONFIG.SCROLL_THROTTLE_KEY, CONFIG.SCROLL_THROTTLE_MS);
+        scrollThrottleInput.min = '50';
+        scrollThrottleInput.max = '2000';
+        scrollThrottleInput.placeholder = String(CONFIG.SCROLL_THROTTLE_MS);
+
+        scrollThrottleWrapper.appendChild(scrollThrottleLabel);
+        scrollThrottleWrapper.appendChild(scrollThrottleInput);
+
+        const scrollDebounceWrapper = document.createElement('div');
+        scrollDebounceWrapper.style.marginTop = '12px';
+
+        const scrollDebounceLabel = document.createElement('label');
+        scrollDebounceLabel.textContent = '滚动防抖(ms)：';
+        scrollDebounceLabel.style.fontSize = '13px';
+        scrollDebounceLabel.style.color = 'var(--vc-accents-5)';
+        scrollDebounceLabel.style.display = 'block';
+        scrollDebounceLabel.style.marginBottom = '4px';
+
+        const scrollDebounceInput = document.createElement('input');
+        scrollDebounceInput.type = 'number';
+        scrollDebounceInput.id = 'vc-scroll-debounce';
+        scrollDebounceInput.className = 'vc-input';
+        scrollDebounceInput.value = getSetting(CONFIG.SCROLL_DEBOUNCE_KEY, CONFIG.SCROLL_DEBOUNCE_MS);
+        scrollDebounceInput.min = '50';
+        scrollDebounceInput.max = '5000';
+        scrollDebounceInput.placeholder = String(CONFIG.SCROLL_DEBOUNCE_MS);
+
+        scrollDebounceWrapper.appendChild(scrollDebounceLabel);
+        scrollDebounceWrapper.appendChild(scrollDebounceInput);
+
         const speedHint = document.createElement('div');
         speedHint.className = 'vc-hint';
         speedHint.textContent = '提示：增加数值可提高翻译速度，但可能增加 API 消耗';
@@ -2001,6 +2052,8 @@
         speedGroup.appendChild(batchSizeWrapper);
         speedGroup.appendChild(concurrencyWrapper);
         speedGroup.appendChild(bufferWrapper);
+        speedGroup.appendChild(scrollThrottleWrapper);
+        speedGroup.appendChild(scrollDebounceWrapper);
         speedGroup.appendChild(speedHint);
 
         // 6. 工具栏
@@ -2151,6 +2204,8 @@
             const newBatchSize = parseInt(batchSizeInput.value) || CONFIG.DEFAULT_BATCH_SIZE;
             const newConcurrency = parseInt(concurrencyInput.value) || CONFIG.DEFAULT_CONCURRENCY;
             const newVisibilityBuffer = parseInt(bufferInput.value) || CONFIG.DEFAULT_VISIBILITY_BUFFER;
+            const newScrollThrottle = parseInt(scrollThrottleInput.value) || CONFIG.SCROLL_THROTTLE_MS;
+            const newScrollDebounce = parseInt(scrollDebounceInput.value) || CONFIG.SCROLL_DEBOUNCE_MS;
 
             // 如果选择了自定义模型，使用自定义输入框的值
             if (newModel === 'custom') {
@@ -2182,6 +2237,18 @@
                 return;
             }
 
+            if (newScrollThrottle < 50 || newScrollThrottle > 2000) {
+                alert('⚠️ 滚动节流必须在 50-2000ms 之间');
+                scrollThrottleInput.focus();
+                return;
+            }
+
+            if (newScrollDebounce < 50 || newScrollDebounce > 5000) {
+                alert('⚠️ 滚动防抖必须在 50-5000ms 之间');
+                scrollDebounceInput.focus();
+                return;
+            }
+
             setSetting(CONFIG.API_KEY_KEY, newKey);
             setSetting(CONFIG.API_ENDPOINT_KEY, newEndpoint);
             setSetting(CONFIG.MODEL_NAME_KEY, newModel);
@@ -2190,6 +2257,8 @@
             setSetting(CONFIG.BATCH_SIZE_KEY, newBatchSize);
             setSetting(CONFIG.CONCURRENCY_KEY, newConcurrency);
             setSetting(CONFIG.VISIBILITY_BUFFER_KEY, newVisibilityBuffer);
+            setSetting(CONFIG.SCROLL_THROTTLE_KEY, newScrollThrottle);
+            setSetting(CONFIG.SCROLL_DEBOUNCE_KEY, newScrollDebounce);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2554,11 +2623,7 @@
             clearInterval(periodicCheckTimer);
         }
 
-        let checkCount = 0;
-        const maxChecks = 10; // 最多检查10次（约30秒）
-
         periodicCheckTimer = setInterval(() => {
-            checkCount++;
             const now = Date.now();
 
             // 避免频繁检查（至少间隔3秒）
@@ -2567,16 +2632,82 @@
             }
             lastCheckTime = now;
 
-            logDebug('定期检查懒加载内容', `第 ${checkCount} 次`);
+            logDebug('定期检查懒加载内容', '执行一次检查');
             replaceText(document.body);
-
-            // 达到最大检查次数后停止
-            if (checkCount >= maxChecks) {
-                clearInterval(periodicCheckTimer);
-                periodicCheckTimer = null;
-                logDebug('定期检查结束', `共检查 ${checkCount} 次`);
-            }
         }, 3000); // 每3秒检查一次
+    }
+
+    function processElementForTranslation(element) {
+        if (!element || shouldIgnoreNode(element)) return;
+
+        element.childNodes.forEach(node => {
+            if (node.nodeType === 3 && node.nodeValue && node.nodeValue.trim()) {
+                translateTextNode(node);
+            }
+        });
+
+        if (element.hasAttribute('title')) {
+            translateAttribute(element, 'title');
+        }
+        if (element.hasAttribute('placeholder')) {
+            translateAttribute(element, 'placeholder');
+        }
+        if (element.hasAttribute('aria-label')) {
+            translateAttribute(element, 'aria-label');
+        }
+        if ((element.tagName === 'INPUT' || element.tagName === 'BUTTON') &&
+            element.hasAttribute('value') &&
+            element.getAttribute('type') !== 'password') {
+            translateAttribute(element, 'value');
+        }
+    }
+
+    function translateVisibleArea() {
+        const root = document.body;
+        if (!root) return;
+
+        if (isElementVisible(root)) {
+            processElementForTranslation(root);
+        }
+
+        const elementWalker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_ELEMENT,
+            {
+                acceptNode: function(node) {
+                    if (shouldIgnoreNode(node)) return NodeFilter.FILTER_REJECT;
+                    if (!isElementVisible(node)) return NodeFilter.FILTER_REJECT;
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            },
+            false
+        );
+
+        let element;
+        while (element = elementWalker.nextNode()) {
+            processElementForTranslation(element);
+        }
+    }
+
+    function scheduleScrollTranslate() {
+        const throttleMs = Number(getSetting(CONFIG.SCROLL_THROTTLE_KEY, CONFIG.SCROLL_THROTTLE_MS)) || CONFIG.SCROLL_THROTTLE_MS;
+        const debounceMs = Number(getSetting(CONFIG.SCROLL_DEBOUNCE_KEY, CONFIG.SCROLL_DEBOUNCE_MS)) || CONFIG.SCROLL_DEBOUNCE_MS;
+        const now = Date.now();
+        const elapsed = now - lastScrollTranslate;
+        const wait = Math.max(0, throttleMs - elapsed);
+
+        if (!scrollThrottleTimer) {
+            scrollThrottleTimer = setTimeout(() => {
+                scrollThrottleTimer = null;
+                lastScrollTranslate = Date.now();
+                translateVisibleArea();
+            }, wait);
+        }
+
+        clearTimeout(scrollDebounceTimer);
+        scrollDebounceTimer = setTimeout(() => {
+            translateVisibleArea();
+        }, debounceMs);
     }
 
     function hookHistoryEvents() {
@@ -2698,6 +2829,9 @@
                 replaceText(document.body);
             }, 1000);
         });
+
+        window.addEventListener('scroll', scheduleScrollTranslate, { passive: true });
+        window.addEventListener('resize', scheduleScrollTranslate);
 
         console.log('[网页翻译] 初始化完成');
         console.log(`- 当前域名: ${domain}`);
