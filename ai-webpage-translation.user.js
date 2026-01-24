@@ -2,12 +2,14 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±400px 缓冲区）
-// @version     1.3.4
+// @version     1.3.5
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
 // @icon        data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">🌐</text></svg>
 // @grant       GM_xmlhttpRequest
+// @grant       GM_getValue
+// @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @grant       GM_setClipboard
 // @connect     *
@@ -43,7 +45,7 @@
     };
 
     // ==================== IndexedDB 存储 ====================
-    function createStorage() {
+    function createCacheStorage() {
         const DB_NAME = 'vc-translation-db';
         const STORE_NAME = 'kv';
         let db = null;
@@ -130,8 +132,32 @@
         };
     }
 
-    const storage = createStorage();
-    await storage.init();
+    function getSetting(key, defaultValue) {
+        if (typeof GM_getValue === 'function') {
+            return GM_getValue(key, defaultValue);
+        }
+        try {
+            const stored = localStorage.getItem(key);
+            return stored === null ? defaultValue : stored;
+        } catch (e) {
+            return defaultValue;
+        }
+    }
+
+    function setSetting(key, value) {
+        if (typeof GM_setValue === 'function') {
+            GM_setValue(key, value);
+            return;
+        }
+        try {
+            localStorage.setItem(key, value);
+        } catch (e) {
+            console.warn('[网页翻译] 本地存储写入失败:', e);
+        }
+    }
+
+    const cacheStorage = createCacheStorage();
+    await cacheStorage.init();
 
     // ==================== UI 样式定义 ====================
     const STYLES = `
@@ -575,7 +601,7 @@
     // 加载白名单
     function loadWhitelist() {
         try {
-            const stored = storage.get(CONFIG.WHITELIST_KEY, '[]');
+            const stored = getSetting(CONFIG.WHITELIST_KEY, '[]');
             const list = JSON.parse(stored);
             return Array.isArray(list) ? list : [];
         } catch (e) {
@@ -587,7 +613,7 @@
     // 保存白名单
     function saveWhitelist(list) {
         try {
-            storage.set(CONFIG.WHITELIST_KEY, JSON.stringify(list));
+            setSetting(CONFIG.WHITELIST_KEY, JSON.stringify(list));
             return true;
         } catch (e) {
             console.error('[网页翻译] 白名单保存失败:', e);
@@ -647,7 +673,7 @@
 
         load() {
             try {
-                const stored = storage.get(this.storageKey, '{}');
+                const stored = cacheStorage.get(this.storageKey, '{}');
                 const data = JSON.parse(stored);
                 const now = Date.now();
 
@@ -707,7 +733,7 @@
                 this.cache.forEach((item, key) => {
                     data[key] = item;
                 });
-                storage.set(this.storageKey, JSON.stringify(data));
+                cacheStorage.set(this.storageKey, JSON.stringify(data));
             } catch (e) {
                 console.warn('[网页翻译] 缓存保存失败:', e);
             }
@@ -715,7 +741,7 @@
 
         clear() {
             this.cache.clear();
-            storage.set(this.storageKey, '{}');
+            cacheStorage.set(this.storageKey, '{}');
         }
     }
 
@@ -799,7 +825,7 @@
         const rect = element.getBoundingClientRect();
         const windowHeight = window.innerHeight || document.documentElement.clientHeight;
         const windowWidth = window.innerWidth || document.documentElement.clientWidth;
-        const buffer = Number(storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)) || CONFIG.DEFAULT_VISIBILITY_BUFFER;
+        const buffer = Number(getSetting(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)) || CONFIG.DEFAULT_VISIBILITY_BUFFER;
 
         return (
             rect.bottom >= -buffer &&
@@ -817,7 +843,7 @@
 
     // 工具函数：检查是否启用调试模式
     function isDebugEnabled() {
-        return storage.get(CONFIG.DEBUG_ENABLED_KEY, false);
+        return getSetting(CONFIG.DEBUG_ENABLED_KEY, false);
     }
 
     // 工具函数：脱敏处理API密钥
@@ -1112,9 +1138,9 @@
 
     // 带重试的翻译函数（最多重试3次）
     async function translateWithDeepL(texts, overrideConfig = {}) {
-        const apiKey = overrideConfig.apiKey ?? storage.get(CONFIG.API_KEY_KEY, '');
-        const endpoint = overrideConfig.endpoint ?? storage.get(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
-        const modelName = overrideConfig.modelName ?? storage.get(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+        const apiKey = overrideConfig.apiKey ?? getSetting(CONFIG.API_KEY_KEY, '');
+        const endpoint = overrideConfig.endpoint ?? getSetting(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
+        const modelName = overrideConfig.modelName ?? getSetting(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
 
         if (!apiKey) {
             throw new Error('未配置 API 密钥');
@@ -1164,7 +1190,7 @@
     // ==================== 翻译记录与进度 ====================
     function loadHistory() {
         try {
-            const stored = storage.get(CONFIG.HISTORY_KEY, '[]');
+            const stored = getSetting(CONFIG.HISTORY_KEY, '[]');
             const parsed = JSON.parse(stored);
             if (Array.isArray(parsed)) {
                 return parsed.slice(0, CONFIG.HISTORY_MAX);
@@ -1186,7 +1212,7 @@
             translationHistory = translationHistory.slice(0, CONFIG.HISTORY_MAX);
         }
         try {
-            storage.set(CONFIG.HISTORY_KEY, JSON.stringify(translationHistory));
+            setSetting(CONFIG.HISTORY_KEY, JSON.stringify(translationHistory));
         } catch (e) {
             console.warn('[网页翻译] 翻译记录保存失败:', e);
         }
@@ -1431,7 +1457,7 @@
         }
 
         // 2. 检查是否启用 AI 翻译
-        const aiEnabled = storage.get(CONFIG.AI_ENABLED_KEY, false);
+        const aiEnabled = getSetting(CONFIG.AI_ENABLED_KEY, false);
         if (!aiEnabled) {
             // 未启用AI，保持原文
             applyCallback(text);
@@ -1620,11 +1646,11 @@
 
     // ==================== 用户配置界面 ====================
     function showConfigDialog() {
-        const currentKey = storage.get(CONFIG.API_KEY_KEY, '');
-        const currentEndpoint = storage.get(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
-        const currentModel = storage.get(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
-        const aiEnabled = storage.get(CONFIG.AI_ENABLED_KEY, false);
-        const debugEnabled = storage.get(CONFIG.DEBUG_ENABLED_KEY, false);
+        const currentKey = getSetting(CONFIG.API_KEY_KEY, '');
+        const currentEndpoint = getSetting(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
+        const currentModel = getSetting(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+        const aiEnabled = getSetting(CONFIG.AI_ENABLED_KEY, false);
+        const debugEnabled = getSetting(CONFIG.DEBUG_ENABLED_KEY, false);
 
         // ✅ 使用 DOM API 避免 XSS (Vercel风格重构)
         const overlay = document.createElement('div');
@@ -1922,7 +1948,7 @@
         batchSizeInput.type = 'number';
         batchSizeInput.id = 'vc-batch-size';
         batchSizeInput.className = 'vc-input';
-        batchSizeInput.value = storage.get(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        batchSizeInput.value = getSetting(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
         batchSizeInput.min = '5';
         batchSizeInput.max = '100';
         batchSizeInput.placeholder = '默认 10';
@@ -1944,7 +1970,7 @@
         concurrencyInput.type = 'number';
         concurrencyInput.id = 'vc-concurrency';
         concurrencyInput.className = 'vc-input';
-        concurrencyInput.value = storage.get(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        concurrencyInput.value = getSetting(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
         concurrencyInput.min = '1';
         concurrencyInput.max = '9999';
         concurrencyInput.placeholder = '默认 2';
@@ -1966,7 +1992,7 @@
         bufferInput.type = 'number';
         bufferInput.id = 'vc-visibility-buffer';
         bufferInput.className = 'vc-input';
-        bufferInput.value = storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER);
+        bufferInput.value = getSetting(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER);
         bufferInput.min = '0';
         bufferInput.max = '2000';
         bufferInput.placeholder = String(CONFIG.DEFAULT_VISIBILITY_BUFFER);
@@ -2163,14 +2189,14 @@
                 return;
             }
 
-            storage.set(CONFIG.API_KEY_KEY, newKey);
-            storage.set(CONFIG.API_ENDPOINT_KEY, newEndpoint);
-            storage.set(CONFIG.MODEL_NAME_KEY, newModel);
-            storage.set(CONFIG.AI_ENABLED_KEY, newEnabled);
-            storage.set(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
-            storage.set(CONFIG.BATCH_SIZE_KEY, newBatchSize);
-            storage.set(CONFIG.CONCURRENCY_KEY, newConcurrency);
-            storage.set(CONFIG.VISIBILITY_BUFFER_KEY, newVisibilityBuffer);
+            setSetting(CONFIG.API_KEY_KEY, newKey);
+            setSetting(CONFIG.API_ENDPOINT_KEY, newEndpoint);
+            setSetting(CONFIG.MODEL_NAME_KEY, newModel);
+            setSetting(CONFIG.AI_ENABLED_KEY, newEnabled);
+            setSetting(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
+            setSetting(CONFIG.BATCH_SIZE_KEY, newBatchSize);
+            setSetting(CONFIG.CONCURRENCY_KEY, newConcurrency);
+            setSetting(CONFIG.VISIBILITY_BUFFER_KEY, newVisibilityBuffer);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2638,8 +2664,8 @@
         console.log(`[网页翻译] ${domain} 在翻译名单中，开始初始化翻译功能`);
 
         // 初始化翻译队列
-        const batchSize = storage.get(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
-        const concurrency = storage.get(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        const batchSize = getSetting(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        const concurrency = getSetting(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
         translationQueue = new TranslationQueue(processBatch, CONFIG.QUEUE_DELAY, batchSize, concurrency);
         updateProgressUI();
         // 🔧 修复：监听 SPA 路由变化
@@ -2684,10 +2710,10 @@
         console.log(`- 当前域名: ${domain}`);
         console.log(`- 缓存键: ${getDomainCacheKey(domain)}`);
         console.log(`- 缓存: ${cache.cache.size} 条`);
-        console.log(`- AI翻译: ${storage.get(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
+        console.log(`- AI翻译: ${getSetting(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
         console.log(`- 可见区域翻译: 已启用`);
-        console.log(`- 调试模式: ${storage.get(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
-        console.log(`- 可见区域缓冲: ±${storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)}px`);
+        console.log(`- 调试模式: ${getSetting(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
+        console.log(`- 可见区域缓冲: ±${getSetting(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)}px`);
     }
 
     // 页面加载完成后初始化
