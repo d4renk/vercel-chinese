@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
-// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±200px 缓冲区）
-// @version     1.3.2
+// @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±400px 缓冲区）
+// @version     1.3.3
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -790,7 +790,7 @@
 
     // ==================== 可见性检测 ====================
 
-    // 检查元素是否在可见区域（高灵敏度：±200px 缓冲区）
+    // 检查元素是否在可见区域（高灵敏度：±400px 缓冲区）
     function isElementVisible(element) {
         if (!element || !element.getBoundingClientRect) return false;
 
@@ -799,8 +799,8 @@
         const windowWidth = window.innerWidth || document.documentElement.clientWidth;
 
         return (
-            rect.bottom >= -200 &&
-            rect.top <= windowHeight + 200 &&
+            rect.bottom >= -400 &&
+            rect.top <= windowHeight + 400 &&
             rect.right >= 0 &&
             rect.left <= windowWidth
         );
