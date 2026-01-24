@@ -2,7 +2,7 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±200px 缓冲区）
-// @version     1.3.1
+// @version     1.3.2
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -871,6 +871,46 @@
             console.error('[网页翻译] 词典导出失败:', err);
             alert(`导出失败: ${err.message}`);
         }
+    }
+
+    function importDictionaryJson() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json';
+
+        input.onchange = () => {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const text = String(reader.result || '');
+                    const parsed = JSON.parse(text);
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                        throw new Error('JSON 需要是对象格式');
+                    }
+                    let imported = 0;
+                    Object.entries(parsed).forEach(([key, value]) => {
+                        if (!key) return;
+                        const normalizedValue = typeof value === 'string' ? value : String(value);
+                        if (!normalizedValue || normalizedValue === key) return;
+                        cache.set(String(key), normalizedValue);
+                        imported += 1;
+                    });
+                    cache.persist();
+                    alert(`成功导入 ${imported} 条翻译`);
+                } catch (err) {
+                    console.error('[网页翻译] 词典导入失败:', err);
+                    alert(`导入失败: ${err.message}`);
+                }
+            };
+            reader.onerror = () => {
+                alert('导入失败: 读取文件错误');
+            };
+            reader.readAsText(file);
+        };
+
+        input.click();
     }
 
     // 核心翻译函数（单次请求）
@@ -2522,6 +2562,7 @@
         // 注册菜单命令（总是注册，方便用户管理白名单）
         GM_registerMenuCommand('⚙️ 翻译设置', showConfigDialog);
         GM_registerMenuCommand('📥 导出词典 JSON', exportDictionaryJson);
+        GM_registerMenuCommand('📤 导入词典 JSON', importDictionaryJson);
 
         // 白名单管理菜单
         GM_registerMenuCommand('✅ 将此网站加入翻译名单', () => {
