@@ -2,7 +2,7 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±400px 缓冲区）
-// @version     1.3.3
+// @version     1.3.4
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
@@ -30,6 +30,8 @@
         CONCURRENCY_KEY: 'vc_concurrency', // 并发翻译数
         DEFAULT_BATCH_SIZE: 10, // 默认每批 10 个单词
         DEFAULT_CONCURRENCY: 2, // 默认 2 个并发
+        VISIBILITY_BUFFER_KEY: 'vc_visibility_buffer',
+        DEFAULT_VISIBILITY_BUFFER: 400, // 默认可见区域缓冲区(px)
         QUEUE_DELAY: 100, // ms
         LANG: 'zh-CN',
         DEFAULT_ENDPOINT: 'https://api-free.deepl.com/v2/translate',
@@ -790,17 +792,18 @@
 
     // ==================== 可见性检测 ====================
 
-    // 检查元素是否在可见区域（高灵敏度：±400px 缓冲区）
+    // 检查元素是否在可见区域（高灵敏度：±buffer 缓冲区）
     function isElementVisible(element) {
         if (!element || !element.getBoundingClientRect) return false;
 
         const rect = element.getBoundingClientRect();
         const windowHeight = window.innerHeight || document.documentElement.clientHeight;
         const windowWidth = window.innerWidth || document.documentElement.clientWidth;
+        const buffer = Number(storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)) || CONFIG.DEFAULT_VISIBILITY_BUFFER;
 
         return (
-            rect.bottom >= -400 &&
-            rect.top <= windowHeight + 400 &&
+            rect.bottom >= -buffer &&
+            rect.top <= windowHeight + buffer &&
             rect.right >= 0 &&
             rect.left <= windowWidth
         );
@@ -1949,6 +1952,28 @@
         concurrencyWrapper.appendChild(concurrencyLabel);
         concurrencyWrapper.appendChild(concurrencyInput);
 
+        const bufferWrapper = document.createElement('div');
+        bufferWrapper.style.marginTop = '12px';
+
+        const bufferLabel = document.createElement('label');
+        bufferLabel.textContent = '可见区域缓冲(px)：';
+        bufferLabel.style.fontSize = '13px';
+        bufferLabel.style.color = 'var(--vc-accents-5)';
+        bufferLabel.style.display = 'block';
+        bufferLabel.style.marginBottom = '4px';
+
+        const bufferInput = document.createElement('input');
+        bufferInput.type = 'number';
+        bufferInput.id = 'vc-visibility-buffer';
+        bufferInput.className = 'vc-input';
+        bufferInput.value = storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER);
+        bufferInput.min = '0';
+        bufferInput.max = '2000';
+        bufferInput.placeholder = String(CONFIG.DEFAULT_VISIBILITY_BUFFER);
+
+        bufferWrapper.appendChild(bufferLabel);
+        bufferWrapper.appendChild(bufferInput);
+
         const speedHint = document.createElement('div');
         speedHint.className = 'vc-hint';
         speedHint.textContent = '提示：增加数值可提高翻译速度，但可能增加 API 消耗';
@@ -1956,6 +1981,7 @@
         speedGroup.appendChild(speedLabel);
         speedGroup.appendChild(batchSizeWrapper);
         speedGroup.appendChild(concurrencyWrapper);
+        speedGroup.appendChild(bufferWrapper);
         speedGroup.appendChild(speedHint);
 
         // 6. 工具栏
@@ -2105,6 +2131,7 @@
             const newDebugEnabled = debugCheckbox.checked;
             const newBatchSize = parseInt(batchSizeInput.value) || CONFIG.DEFAULT_BATCH_SIZE;
             const newConcurrency = parseInt(concurrencyInput.value) || CONFIG.DEFAULT_CONCURRENCY;
+            const newVisibilityBuffer = parseInt(bufferInput.value) || CONFIG.DEFAULT_VISIBILITY_BUFFER;
 
             // 如果选择了自定义模型，使用自定义输入框的值
             if (newModel === 'custom') {
@@ -2130,6 +2157,12 @@
                 return;
             }
 
+            if (newVisibilityBuffer < 0 || newVisibilityBuffer > 2000) {
+                alert('⚠️ 可见区域缓冲必须在 0-2000 之间');
+                bufferInput.focus();
+                return;
+            }
+
             storage.set(CONFIG.API_KEY_KEY, newKey);
             storage.set(CONFIG.API_ENDPOINT_KEY, newEndpoint);
             storage.set(CONFIG.MODEL_NAME_KEY, newModel);
@@ -2137,6 +2170,7 @@
             storage.set(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
             storage.set(CONFIG.BATCH_SIZE_KEY, newBatchSize);
             storage.set(CONFIG.CONCURRENCY_KEY, newConcurrency);
+            storage.set(CONFIG.VISIBILITY_BUFFER_KEY, newVisibilityBuffer);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2653,6 +2687,7 @@
         console.log(`- AI翻译: ${storage.get(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
         console.log(`- 可见区域翻译: 已启用`);
         console.log(`- 调试模式: ${storage.get(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
+        console.log(`- 可见区域缓冲: ±${storage.get(CONFIG.VISIBILITY_BUFFER_KEY, CONFIG.DEFAULT_VISIBILITY_BUFFER)}px`);
     }
 
     // 页面加载完成后初始化
