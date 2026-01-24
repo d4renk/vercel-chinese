@@ -2,21 +2,19 @@
 // @name        通用网页翻译 (AI 增强版)
 // @namespace   https://github.com/liyixin21/vercel-chinese
 // @description 通用网页自动翻译工具 (支持 AI 自动翻译) - 高灵敏度翻译模式（±200px 缓冲区）
-// @version     1.3.0
+// @version     1.3.1
 // @author      liyixin21
 // @license     GPL-3.0
 // @match       *://*/*
 // @icon        data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">🌐</text></svg>
 // @grant       GM_xmlhttpRequest
-// @grant       GM_getValue
-// @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @grant       GM_setClipboard
 // @connect     *
 // @run-at      document-end
 // ==/UserScript==
 
-(function() {
+(async function() {
     'use strict';
 
     // ==================== 配置常量 ====================
@@ -41,6 +39,97 @@
         DEBUG_ENABLED_KEY: 'vc_debug_enabled',
         WHITELIST_KEY: 'vc_translate_whitelist' // 翻译白名单
     };
+
+    // ==================== IndexedDB 存储 ====================
+    function createStorage() {
+        const DB_NAME = 'vc-translation-db';
+        const STORE_NAME = 'kv';
+        let db = null;
+        const cache = new Map();
+
+        function openDb() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = () => {
+                    const database = request.result;
+                    if (!database.objectStoreNames.contains(STORE_NAME)) {
+                        database.createObjectStore(STORE_NAME);
+                    }
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        function loadAll() {
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (cursor) {
+                        cache.set(cursor.key, cursor.value);
+                        cursor.continue();
+                    }
+                };
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error || request.error);
+            });
+        }
+
+        async function setValue(key, value) {
+            cache.set(key, value);
+            if (!db) return;
+            try {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                store.put(value, key);
+                await new Promise((resolve, reject) => {
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                });
+            } catch (e) {
+                console.warn('[网页翻译] IndexedDB 保存失败:', e);
+            }
+        }
+
+        async function deleteValue(key) {
+            cache.delete(key);
+            if (!db) return;
+            try {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                store.delete(key);
+                await new Promise((resolve, reject) => {
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                });
+            } catch (e) {
+                console.warn('[网页翻译] IndexedDB 删除失败:', e);
+            }
+        }
+
+        return {
+            async init() {
+                if (db) return;
+                try {
+                    db = await openDb();
+                    await loadAll();
+                } catch (e) {
+                    console.warn('[网页翻译] IndexedDB 初始化失败:', e);
+                }
+            },
+            get(key, defaultValue) {
+                return cache.has(key) ? cache.get(key) : defaultValue;
+            },
+            set: setValue,
+            delete: deleteValue
+        };
+    }
+
+    const storage = createStorage();
+    await storage.init();
 
     // ==================== UI 样式定义 ====================
     const STYLES = `
@@ -484,7 +573,7 @@
     // 加载白名单
     function loadWhitelist() {
         try {
-            const stored = GM_getValue(CONFIG.WHITELIST_KEY, '[]');
+            const stored = storage.get(CONFIG.WHITELIST_KEY, '[]');
             const list = JSON.parse(stored);
             return Array.isArray(list) ? list : [];
         } catch (e) {
@@ -496,7 +585,7 @@
     // 保存白名单
     function saveWhitelist(list) {
         try {
-            GM_setValue(CONFIG.WHITELIST_KEY, JSON.stringify(list));
+            storage.set(CONFIG.WHITELIST_KEY, JSON.stringify(list));
             return true;
         } catch (e) {
             console.error('[网页翻译] 白名单保存失败:', e);
@@ -556,7 +645,7 @@
 
         load() {
             try {
-                const stored = GM_getValue(this.storageKey, '{}');
+                const stored = storage.get(this.storageKey, '{}');
                 const data = JSON.parse(stored);
                 const now = Date.now();
 
@@ -616,7 +705,7 @@
                 this.cache.forEach((item, key) => {
                     data[key] = item;
                 });
-                GM_setValue(this.storageKey, JSON.stringify(data));
+                storage.set(this.storageKey, JSON.stringify(data));
             } catch (e) {
                 console.warn('[网页翻译] 缓存保存失败:', e);
             }
@@ -624,7 +713,7 @@
 
         clear() {
             this.cache.clear();
-            GM_setValue(this.storageKey, '{}');
+            storage.set(this.storageKey, '{}');
         }
     }
 
@@ -677,7 +766,7 @@
 
     // ==================== 全局状态 ====================
     const currentDomain = getCurrentDomain();
-    const cache = new LRUCache(CONFIG.CACHE_MAX, CONFIG.CACHE_TTL_MS, getDomainCacheKey(currentDomain));
+    let cache = new LRUCache(CONFIG.CACHE_MAX, CONFIG.CACHE_TTL_MS, getDomainCacheKey(currentDomain));
     let translationQueue = null;
     let translationHistory = loadHistory();
     const pendingTexts = new Set();
@@ -725,7 +814,7 @@
 
     // 工具函数：检查是否启用调试模式
     function isDebugEnabled() {
-        return GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false);
+        return storage.get(CONFIG.DEBUG_ENABLED_KEY, false);
     }
 
     // 工具函数：脱敏处理API密钥
@@ -980,9 +1069,9 @@
 
     // 带重试的翻译函数（最多重试3次）
     async function translateWithDeepL(texts, overrideConfig = {}) {
-        const apiKey = overrideConfig.apiKey ?? GM_getValue(CONFIG.API_KEY_KEY, '');
-        const endpoint = overrideConfig.endpoint ?? GM_getValue(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
-        const modelName = overrideConfig.modelName ?? GM_getValue(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+        const apiKey = overrideConfig.apiKey ?? storage.get(CONFIG.API_KEY_KEY, '');
+        const endpoint = overrideConfig.endpoint ?? storage.get(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
+        const modelName = overrideConfig.modelName ?? storage.get(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
 
         if (!apiKey) {
             throw new Error('未配置 API 密钥');
@@ -1032,7 +1121,7 @@
     // ==================== 翻译记录与进度 ====================
     function loadHistory() {
         try {
-            const stored = GM_getValue(CONFIG.HISTORY_KEY, '[]');
+            const stored = storage.get(CONFIG.HISTORY_KEY, '[]');
             const parsed = JSON.parse(stored);
             if (Array.isArray(parsed)) {
                 return parsed.slice(0, CONFIG.HISTORY_MAX);
@@ -1054,7 +1143,7 @@
             translationHistory = translationHistory.slice(0, CONFIG.HISTORY_MAX);
         }
         try {
-            GM_setValue(CONFIG.HISTORY_KEY, JSON.stringify(translationHistory));
+            storage.set(CONFIG.HISTORY_KEY, JSON.stringify(translationHistory));
         } catch (e) {
             console.warn('[网页翻译] 翻译记录保存失败:', e);
         }
@@ -1299,7 +1388,7 @@
         }
 
         // 2. 检查是否启用 AI 翻译
-        const aiEnabled = GM_getValue(CONFIG.AI_ENABLED_KEY, false);
+        const aiEnabled = storage.get(CONFIG.AI_ENABLED_KEY, false);
         if (!aiEnabled) {
             // 未启用AI，保持原文
             applyCallback(text);
@@ -1488,11 +1577,11 @@
 
     // ==================== 用户配置界面 ====================
     function showConfigDialog() {
-        const currentKey = GM_getValue(CONFIG.API_KEY_KEY, '');
-        const currentEndpoint = GM_getValue(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
-        const currentModel = GM_getValue(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
-        const aiEnabled = GM_getValue(CONFIG.AI_ENABLED_KEY, false);
-        const debugEnabled = GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false);
+        const currentKey = storage.get(CONFIG.API_KEY_KEY, '');
+        const currentEndpoint = storage.get(CONFIG.API_ENDPOINT_KEY, CONFIG.DEFAULT_ENDPOINT);
+        const currentModel = storage.get(CONFIG.MODEL_NAME_KEY, CONFIG.DEFAULT_MODEL);
+        const aiEnabled = storage.get(CONFIG.AI_ENABLED_KEY, false);
+        const debugEnabled = storage.get(CONFIG.DEBUG_ENABLED_KEY, false);
 
         // ✅ 使用 DOM API 避免 XSS (Vercel风格重构)
         const overlay = document.createElement('div');
@@ -1790,7 +1879,7 @@
         batchSizeInput.type = 'number';
         batchSizeInput.id = 'vc-batch-size';
         batchSizeInput.className = 'vc-input';
-        batchSizeInput.value = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        batchSizeInput.value = storage.get(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
         batchSizeInput.min = '5';
         batchSizeInput.max = '100';
         batchSizeInput.placeholder = '默认 10';
@@ -1812,7 +1901,7 @@
         concurrencyInput.type = 'number';
         concurrencyInput.id = 'vc-concurrency';
         concurrencyInput.className = 'vc-input';
-        concurrencyInput.value = GM_getValue(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        concurrencyInput.value = storage.get(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
         concurrencyInput.min = '1';
         concurrencyInput.max = '9999';
         concurrencyInput.placeholder = '默认 2';
@@ -2001,13 +2090,13 @@
                 return;
             }
 
-            GM_setValue(CONFIG.API_KEY_KEY, newKey);
-            GM_setValue(CONFIG.API_ENDPOINT_KEY, newEndpoint);
-            GM_setValue(CONFIG.MODEL_NAME_KEY, newModel);
-            GM_setValue(CONFIG.AI_ENABLED_KEY, newEnabled);
-            GM_setValue(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
-            GM_setValue(CONFIG.BATCH_SIZE_KEY, newBatchSize);
-            GM_setValue(CONFIG.CONCURRENCY_KEY, newConcurrency);
+            storage.set(CONFIG.API_KEY_KEY, newKey);
+            storage.set(CONFIG.API_ENDPOINT_KEY, newEndpoint);
+            storage.set(CONFIG.MODEL_NAME_KEY, newModel);
+            storage.set(CONFIG.AI_ENABLED_KEY, newEnabled);
+            storage.set(CONFIG.DEBUG_ENABLED_KEY, newDebugEnabled);
+            storage.set(CONFIG.BATCH_SIZE_KEY, newBatchSize);
+            storage.set(CONFIG.CONCURRENCY_KEY, newConcurrency);
 
             closeDialog();
             alert('✅ 设置已保存！刷新页面生效。');
@@ -2474,8 +2563,8 @@
         console.log(`[网页翻译] ${domain} 在翻译名单中，开始初始化翻译功能`);
 
         // 初始化翻译队列
-        const batchSize = GM_getValue(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
-        const concurrency = GM_getValue(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
+        const batchSize = storage.get(CONFIG.BATCH_SIZE_KEY, CONFIG.DEFAULT_BATCH_SIZE);
+        const concurrency = storage.get(CONFIG.CONCURRENCY_KEY, CONFIG.DEFAULT_CONCURRENCY);
         translationQueue = new TranslationQueue(processBatch, CONFIG.QUEUE_DELAY, batchSize, concurrency);
         updateProgressUI();
         // 🔧 修复：监听 SPA 路由变化
@@ -2520,9 +2609,9 @@
         console.log(`- 当前域名: ${domain}`);
         console.log(`- 缓存键: ${getDomainCacheKey(domain)}`);
         console.log(`- 缓存: ${cache.cache.size} 条`);
-        console.log(`- AI翻译: ${GM_getValue(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
+        console.log(`- AI翻译: ${storage.get(CONFIG.AI_ENABLED_KEY, false) ? '已启用' : '未启用'}`);
         console.log(`- 可见区域翻译: 已启用`);
-        console.log(`- 调试模式: ${GM_getValue(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
+        console.log(`- 调试模式: ${storage.get(CONFIG.DEBUG_ENABLED_KEY, false) ? '已开启' : '未开启'}`);
     }
 
     // 页面加载完成后初始化
